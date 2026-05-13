@@ -1,0 +1,17 @@
+# Core dependencies (Python standard library)
+# - zipfile
+# - tarfile
+# - gzip
+# - bz2
+# - lzma
+# - argparse
+# - getpass
+# - shutil
+# - tempfile
+# - os
+# - sys
+
+# Optional dependencies for additional archive formats
+sevenziar>=0.3.0  # For 7z support
+rarfile>=4.0  # For RAR support
+tqdm>=4.0.0  # For progress bar
