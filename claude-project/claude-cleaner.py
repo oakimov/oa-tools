@@ -1,13 +1,7 @@
 #!/usr/bin/env python3
 """Cross-project Claude Code session & memory browser/cleanup tool."""
 
-import json
 import os
-import re
-import shutil
-from datetime import datetime
-from dataclasses import dataclass, field
-from typing import List, Optional, Tuple
 
 from prompt_toolkit import Application
 from prompt_toolkit.application.current import get_app
@@ -25,298 +19,35 @@ from prompt_toolkit.layout.layout import Layout
 from prompt_toolkit.styles import Style
 from prompt_toolkit.widgets import Frame
 
-CLAUDE_DIR = os.path.expanduser("~/.claude")
-PROJECTS_DIR = os.path.join(CLAUDE_DIR, "projects")
-SESSIONS_DIR = os.path.join(CLAUDE_DIR, "sessions")
-SESSION_ENV_DIR = os.path.join(CLAUDE_DIR, "session-env")
-FILE_HISTORY_DIR = os.path.join(CLAUDE_DIR, "file-history")
-
-
-# ---------------------------------------------------------------------------
-# Data model
-# ---------------------------------------------------------------------------
-
-@dataclass
-class ConversationInfo:
-    session_id: str
-    slug: str = ""
-    title: str = ""
-    message_count: int = 0
-    timestamp: str = ""
-    file_size: int = 0
-    chat_size: int = 0
-    subagent_size: int = 0
-    tool_size: int = 0
-
-
-@dataclass
-class MemoryInfo:
-    filepath: str
-    name: str = ""
-    description: str = ""
-    mem_type: str = ""
-    origin_session: str = ""
-
-
-@dataclass
-class ProjectInfo:
-    path: str
-    display_name: str
-    conversations: List[ConversationInfo] = field(default_factory=list)
-    memories: List[MemoryInfo] = field(default_factory=list)
-    total_size: int = 0
-
-
-# ---------------------------------------------------------------------------
-# Data scanning
-# ---------------------------------------------------------------------------
-
-def resolve_project_realpath(project_dir: str) -> str:
-    """Extract the real project path from ~/.claude/projects/ subdirectory.
-
-    The dirname encodes the path by replacing / with -, which is lossy
-    when directory names contain hyphens. Read cwd from the first user
-    message in any conversation file instead.
-    """
-    home = os.path.expanduser("~")
-    if os.path.isdir(project_dir):
-        for fname in sorted(os.listdir(project_dir)):
-            if not fname.endswith(".jsonl"):
-                continue
-            fpath = os.path.join(project_dir, fname)
-            try:
-                with open(fpath, "r", errors="replace") as f:
-                    for line in f:
-                        try:
-                            obj = json.loads(line)
-                            if obj.get("type") == "user" and obj.get("cwd"):
-                                raw = obj["cwd"]
-                                if raw.startswith(home):
-                                    return "~" + raw[len(home):]
-                                return raw
-                        except json.JSONDecodeError:
-                            continue
-            except Exception:
-                continue
-    # Fallback: heuristic decode for home dir
-    encoded = os.path.basename(project_dir)
-    parts = encoded.strip("-").split("-")
-    path = "/" + "/".join(parts)
-    if path.startswith(home):
-        return "~" + path[len(home):]
-    return path
-
-
-
-def scan_conversation(path: str) -> ConversationInfo:
-    session_id = os.path.splitext(os.path.basename(path))[0]
-    slug = ""
-    title = ""
-    user_asst_count = 0
-    ts = ""
-    try:
-        with open(path, "r", errors="replace") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if obj.get("type") in ("user", "assistant"):
-                    user_asst_count += 1
-                if not slug and obj.get("slug"):
-                    slug = obj["slug"]
-                if not title and obj.get("type") == "custom-title":
-                    ct = obj.get("customTitle", "")
-                    if ct:
-                        title = ct
-                if obj.get("timestamp"):
-                    ts = obj["timestamp"]
-    except Exception:
-        pass
-    chat_sz = os.path.getsize(path)
-    subagent_sz = 0
-    tool_sz = 0
-    conv_dir = os.path.splitext(path)[0]
-    if os.path.isdir(conv_dir):
-        subagent_dir = os.path.join(conv_dir, "subagents")
-        tool_dir = os.path.join(conv_dir, "tool-results")
-        if os.path.isdir(subagent_dir):
-            for dirpath, dirnames, filenames in os.walk(subagent_dir):
-                for fn in filenames:
-                    try:
-                        subagent_sz += os.path.getsize(os.path.join(dirpath, fn))
-                    except OSError:
-                        pass
-        if os.path.isdir(tool_dir):
-            for dirpath, dirnames, filenames in os.walk(tool_dir):
-                for fn in filenames:
-                    try:
-                        tool_sz += os.path.getsize(os.path.join(dirpath, fn))
-                    except OSError:
-                        pass
-    total_sz = chat_sz + subagent_sz + tool_sz
-    return ConversationInfo(
-        session_id=session_id,
-        slug=slug,
-        title=title,
-        message_count=user_asst_count,
-        timestamp=ts,
-        file_size=total_sz,
-        chat_size=chat_sz,
-        subagent_size=subagent_sz,
-        tool_size=tool_sz,
-    )
-
-
-def scan_memories(memory_dir: str) -> List[MemoryInfo]:
-    memories = []
-    if not os.path.isdir(memory_dir):
-        return memories
-
-    memindex = os.path.join(memory_dir, "MEMORY.md")
-    if not os.path.isfile(memindex):
-        return memories
-
-    md_files = [os.path.join(memory_dir, f) for f in os.listdir(memory_dir)
-                if f.endswith(".md") and f != "MEMORY.md"]
-
-    for fp in md_files:
-        try:
-            with open(fp, "r", errors="replace") as f:
-                content = f.read()
-        except Exception:
-            continue
-        name = ""
-        desc = ""
-        mem_type = ""
-        origin = ""
-        fm_match = re.match(r"^---\s*\n(.*?)\n---", content, re.DOTALL)
-        if fm_match:
-            fm_text = fm_match.group(1)
-            for line in fm_text.split("\n"):
-                if line.startswith("name:"):
-                    name = line.split(":", 1)[1].strip().strip('"').strip("'")
-                elif line.startswith("description:"):
-                    desc = line.split(":", 1)[1].strip().strip('"').strip("'")
-                elif line.startswith("type:"):
-                    mem_type = line.split(":", 1)[1].strip().strip('"').strip("'")
-                elif line.startswith("originSessionId:"):
-                    origin = line.split(":", 1)[1].strip().strip('"').strip("'")
-        if name:
-            memories.append(MemoryInfo(
-                filepath=fp,
-                name=name,
-                description=desc,
-                mem_type=mem_type,
-                origin_session=origin,
-            ))
-    return memories
-
-
-def scan_all_projects() -> List[ProjectInfo]:
-    projects = []
-    if not os.path.isdir(PROJECTS_DIR):
-        return projects
-
-    for entry in sorted(os.listdir(PROJECTS_DIR)):
-        proj_dir = os.path.join(PROJECTS_DIR, entry)
-        if not os.path.isdir(proj_dir):
-            continue
-
-        conversations = []
-        total_size = 0
-        for fname in os.listdir(proj_dir):
-            if not fname.endswith(".jsonl"):
-                continue
-            fpath = os.path.join(proj_dir, fname)
-            if not os.path.isfile(fpath):
-                continue
-            conv = scan_conversation(fpath)
-            conversations.append(conv)
-
-        for dirpath, dirnames, filenames in os.walk(proj_dir):
-            for fn in filenames:
-                fpath = os.path.join(dirpath, fn)
-                try:
-                    total_size += os.path.getsize(fpath)
-                except OSError:
-                    pass
-
-        memories = scan_memories(os.path.join(proj_dir, "memory"))
-
-        conversations.sort(key=lambda c: c.timestamp or "", reverse=True)
-
-        projects.append(ProjectInfo(
-            path=entry,
-            display_name=resolve_project_realpath(proj_dir),
-            conversations=conversations,
-            memories=memories,
-            total_size=total_size,
-        ))
-
-    projects.sort(key=lambda p: p.total_size, reverse=True)
-    return projects
-
-
-def get_conversation_messages(session_id: str, proj_path: str) -> List[dict]:
-    fpath = os.path.join(PROJECTS_DIR, proj_path, session_id + ".jsonl")
-    messages = []
-    if not os.path.isfile(fpath):
-        return messages
-    try:
-        with open(fpath, "r", errors="replace") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    obj = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                if obj.get("type") in ("user", "assistant"):
-                    messages.append(obj)
-    except Exception:
-        pass
-    return messages
-
-
-def get_memory_content(filepath: str) -> Tuple[str, str]:
-    try:
-        with open(filepath, "r", errors="replace") as f:
-            content = f.read()
-    except Exception:
-        return "", "(error reading file)"
-    fm_match = re.match(r"^---\s*\n(.*?)\n---\s*\n?(.*)", content, re.DOTALL)
-    if fm_match:
-        return fm_match.group(1), fm_match.group(2)
-    return "", content
-
-
-def format_size(sz: int) -> str:
-    if sz < 1024:
-        return f"{sz}B"
-    elif sz < 1024 * 1024:
-        return f"{sz / 1024:.0f}K"
-    else:
-        return f"{sz / 1024 / 1024:.1f}M"
-
-
-def format_timestamp_short(ts: str) -> str:
-    """Like 'May 20' or '2025-12-01' if older than 6 months."""
-    if not ts or len(ts) < 10:
-        return ts[:10] if ts else ""
-    try:
-        dt = datetime.fromisoformat(ts[:19])
-        now = datetime.now()
-        if (now - dt).days > 180:
-            return dt.strftime("%Y-%m-%d")
-        return dt.strftime("%b %d")
-    except Exception:
-        return ts[:10]
-
+from claude_shared import (
+    PLAN_APPROVED,
+    PLAN_CANCELLED,
+    PLAN_PENDING,
+    PROJECTS_DIR,
+    ConversationInfo,
+    MemoryInfo,
+    PlanInfo,
+    ProjectInfo,
+    delete_conversation,
+    delete_plan,
+    delete_project_config,
+    delete_project_filesystem_by_dir,
+    delete_project_unified,
+    find_json_key_for_dir,
+    format_size,
+    format_timestamp_short,
+    get_conversation_messages,
+    get_global_mcp_servers,
+    get_memory_content,
+    get_project_mcp_status,
+    get_project_paths,
+    load_config,
+    save_config,
+    scan_all_plans,
+    scan_all_projects,
+    scan_conversation,
+    scan_memories,
+)
 
 # ---------------------------------------------------------------------------
 # TUI
@@ -327,55 +58,69 @@ VIEW_PROJECT_DETAIL = "project_detail"
 VIEW_CONVERSATION = "conversation"
 VIEW_MEMORY = "memory"
 VIEW_CONFIRM_DELETE = "confirm_delete"
+VIEW_PLANS = "plans"
 
 
 class CleanerTUI:
     def __init__(self):
-        self.projects: List[ProjectInfo] = []
+        self.projects = []
         self.view = VIEW_PROJECTS
 
-        # project list state
         self.proj_cursor = 0
 
-        # project detail state
-        self.current_project: Optional[ProjectInfo] = None
+        self.current_project = None
         self.detail_pane = "conversations"
         self.conv_cursor = 0
         self.mem_cursor = 0
-        self.conv_sort_key = "date"  # "date" | "size"
+        self.conv_sort_key = "date"
         self.conv_sort_desc = True
 
-        # conversation view state
-        self.current_messages: List[dict] = []
+        self.current_messages = []
         self.conv_msg_scroll = 0
         self.conv_title = ""
 
-        # memory view state
-        self.current_memory: Optional[MemoryInfo] = None
+        self.current_memory = None
         self.memory_fm = ""
         self.memory_body = ""
         self.memory_scroll = 0
 
-        # confirm delete state
         self.delete_target = ""
         self.delete_path = ""
         self.delete_callback = None
         self.delete_return_view = VIEW_PROJECT_DETAIL
+        self.confirm_title = "Confirm Delete"
 
+        self.show_mcp = False
+        self.config = {}
         self.status_message = "Ready"
+        self.all_plans = []
+        self.plan_cursor = 0
 
     # ------------------------------------------------------------------
     # Helpers
     # ------------------------------------------------------------------
 
-    def _set_status(self, text: str):
+    def _set_status(self, text):
         self.status_message = text
+
+    def _project_has_enabled_mcp(self, encoded_dir):
+        if not self.config:
+            return False
+        json_key = find_json_key_for_dir(self.config, encoded_dir)
+        if not json_key:
+            return False
+        status = get_project_mcp_status(self.config, json_key)
+        return len(status["enabled"]) > 0
+
+    def _get_project_plans(self, encoded_dir):
+        """Get existing (files on disk) plans for a project."""
+        return [p for p in self.all_plans if p.project_dir == encoded_dir and p.plan_paths]
 
     def _reset_all_scroll(self):
         self.conv_msg_scroll = 0
         self.memory_scroll = 0
 
-    def _enter_view(self, view: str):
+    def _enter_view(self, view):
         self.view = view
         self._reset_all_scroll()
 
@@ -388,24 +133,24 @@ class CleanerTUI:
             self._enter_view(VIEW_PROJECT_DETAIL)
         elif self.view == VIEW_CONFIRM_DELETE:
             self._enter_view(self.delete_return_view)
+        elif self.view == VIEW_PLANS:
+            self._enter_view(VIEW_PROJECTS)
 
     # ------------------------------------------------------------------
     # Navigation actions
     # ------------------------------------------------------------------
 
     def _enter_project(self):
-        if not self.projects:
-            return
-        if self.proj_cursor >= len(self.projects):
+        if not self.projects or self.proj_cursor >= len(self.projects):
             return
         self.current_project = self.projects[self.proj_cursor]
         self.conv_cursor = 0
         self.mem_cursor = 0
         self.detail_pane = "conversations"
+        self.show_mcp = False
         self._enter_view(VIEW_PROJECT_DETAIL)
 
     def _sorted_convs(self):
-        """Return the current project's conversations sorted by current sort key."""
         convs = list(self.current_project.conversations)
         if self.conv_sort_key == "size":
             convs.sort(key=lambda c: c.file_size, reverse=self.conv_sort_desc)
@@ -441,10 +186,7 @@ class CleanerTUI:
 
     def _delete_current_item(self):
         if self.view == VIEW_CONVERSATION:
-            if not self.current_project:
-                return
-            # find the conversation by matching session_id from current messages
-            if not self.current_messages:
+            if not self.current_project or not self.current_messages:
                 return
             session_id = None
             for msg in self.current_messages:
@@ -454,8 +196,7 @@ class CleanerTUI:
                     break
             if not session_id:
                 return
-            convs = self.current_project.conversations
-            conv = next((c for c in convs if c.session_id == session_id), None)
+            conv = next((c for c in self.current_project.conversations if c.session_id == session_id), None)
             if not conv:
                 return
             self.delete_target = f"Conversation: {conv.slug or conv.session_id[:12]}"
@@ -495,63 +236,55 @@ class CleanerTUI:
                 self.delete_return_view = VIEW_PROJECT_DETAIL
         else:
             return
+        self.confirm_title = "Confirm Delete"
         self._enter_view(VIEW_CONFIRM_DELETE)
 
     def _confirm_delete(self):
         if self.delete_callback:
             self.delete_callback()
         self._go_back()
+        if self.delete_callback:
+            self.delete_callback()
+        self._go_back()
 
     def _do_delete_project(self):
-        path = self.delete_path
-        proj_name = os.path.basename(path)
-        if os.path.isdir(path):
-            shutil.rmtree(path)
-            self.projects = [p for p in self.projects if p.path != proj_name]
-            self.proj_cursor = min(self.proj_cursor, max(0, len(self.projects) - 1))
-            self._set_status(f"Deleted project: {self.delete_target}")
+        proj = self.projects[self.proj_cursor]
+
+        # Try unified delete via JSON key
+        try:
+            data = load_config()
+            json_key = find_json_key_for_dir(data, proj.path)
+            if json_key:
+                result = delete_project_unified(json_key)
+                n = len(result["filesystem_removed"])
+                self._set_status(f"Deleted: {proj.display_name} (config + {n} items)")
+            else:
+                removed = delete_project_filesystem_by_dir(proj.path)
+                self._set_status(f"Deleted: {proj.display_name} ({len(removed)} filesystem items)")
+        except Exception:
+            # Fallback: filesystem only
+            removed = delete_project_filesystem_by_dir(proj.path)
+            self._set_status(f"Deleted: {proj.display_name} ({len(removed)} filesystem items)")
+
+        self.projects = [p for p in self.projects if p.path != proj.path]
+        self.proj_cursor = min(self.proj_cursor, max(0, len(self.projects) - 1))
 
     def _do_delete_conversation(self):
-        path = self.delete_path
-        session_id = os.path.splitext(os.path.basename(path))[0]
-        conv_dir = os.path.splitext(path)[0]
-        if os.path.isfile(path):
-            os.remove(path)
-        if os.path.isdir(conv_dir):
-            shutil.rmtree(conv_dir)
-        # Clean up session artifacts across ~/.claude/
-        env_dir = os.path.join(SESSION_ENV_DIR, session_id)
-        if os.path.isdir(env_dir):
-            shutil.rmtree(env_dir)
-        fh_dir = os.path.join(FILE_HISTORY_DIR, session_id)
-        if os.path.isdir(fh_dir):
-            shutil.rmtree(fh_dir)
-        if os.path.isdir(SESSIONS_DIR):
-            for sf in os.listdir(SESSIONS_DIR):
-                if not sf.endswith(".json"):
-                    continue
-                sfp = os.path.join(SESSIONS_DIR, sf)
-                try:
-                    with open(sfp) as f:
-                        sess = json.load(f)
-                    if sess.get("sessionId") == session_id:
-                        os.remove(sfp)
-                except (OSError, json.JSONDecodeError):
-                    pass
+        session_id = os.path.splitext(os.path.basename(self.delete_path))[0]
+        removed = delete_conversation(session_id, self.current_project.path)
         conv_name = self.delete_target.split(":", 1)[-1].strip() if self.delete_target else session_id[:12]
-        self._set_status(f"Deleted: {conv_name}")
+        self._set_status(f"Deleted: {conv_name} ({len(removed)} items)")
         if self.current_project:
             self._rescan_project(self.current_project)
 
     def _do_delete_memory(self):
-        path = self.delete_path
-        if os.path.isfile(path):
-            os.remove(path)
-            self._set_status(f"Deleted memory: {os.path.basename(path)}")
-            if self.current_project:
-                self._rescan_project(self.current_project)
+        if os.path.isfile(self.delete_path):
+            os.remove(self.delete_path)
+        self._set_status(f"Deleted memory: {os.path.basename(self.delete_path)}")
+        if self.current_project:
+            self._rescan_project(self.current_project)
 
-    def _rescan_project(self, proj: ProjectInfo):
+    def _rescan_project(self, proj):
         proj_dir = os.path.join(PROJECTS_DIR, proj.path)
         convs = []
         total_size = 0
@@ -561,22 +294,141 @@ class CleanerTUI:
             fpath = os.path.join(proj_dir, fname)
             if not os.path.isfile(fpath):
                 continue
-            conv = scan_conversation(fpath)
-            convs.append(conv)
-        for dirpath, dirnames, filenames in os.walk(proj_dir):
+            convs.append(scan_conversation(fpath))
+        for dirpath, _, filenames in os.walk(proj_dir):
             for fn in filenames:
-                fpath = os.path.join(dirpath, fn)
                 try:
-                    total_size += os.path.getsize(fpath)
+                    total_size += os.path.getsize(os.path.join(dirpath, fn))
                 except OSError:
                     pass
         convs.sort(key=lambda c: c.timestamp or "", reverse=True)
         proj.conversations = convs
         proj.total_size = total_size
         proj.memories = scan_memories(os.path.join(proj_dir, "memory"))
-        # clamp cursors
         self.conv_cursor = min(self.conv_cursor, max(0, len(convs) - 1)) if convs else 0
         self.mem_cursor = min(self.mem_cursor, max(0, len(proj.memories) - 1)) if proj.memories else 0
+
+    # ------------------------------------------------------------------
+    # Plan cleanup
+    # ------------------------------------------------------------------
+
+    def _enter_plans(self):
+        self.plan_cursor = 0
+        self._enter_view(VIEW_PLANS)
+
+    def _delete_plan_item(self):
+        if not self.all_plans or self.plan_cursor >= len(self.all_plans):
+            return
+        plan = self.all_plans[self.plan_cursor]
+        if plan.status == PLAN_PENDING:
+            self._set_status("Cannot delete pending plan")
+            return
+        if not plan.plan_paths:
+            self._set_status("No plan files on disk")
+            return
+        self.delete_target = f"Plan: {plan.slug} [{plan.status}]"
+        self.delete_path = ", ".join(plan.plan_paths)
+        self.delete_callback = self._do_delete_plan
+        self.delete_return_view = VIEW_PLANS
+        self.confirm_title = "Confirm Delete"
+        self._enter_view(VIEW_CONFIRM_DELETE)
+
+    def _delete_all_removable_plans(self):
+        removable = [p for p in self.all_plans
+                     if p.status in (PLAN_APPROVED, PLAN_CANCELLED) and p.plan_paths]
+        if not removable:
+            self._set_status("No removable plans with files")
+            return
+        self.delete_target = f"All removable plans ({len(removable)})"
+        self.delete_path = "(multiple files)"
+        self.delete_callback = lambda: self._do_delete_all_plans(removable)
+        self.delete_return_view = VIEW_PLANS
+        self.confirm_title = "Confirm Delete"
+        self._enter_view(VIEW_CONFIRM_DELETE)
+
+    def _do_delete_plan(self):
+        plan = self.all_plans[self.plan_cursor]
+        removed = delete_plan(plan)
+        self._set_status(f"Deleted plan: {plan.slug} ({len(removed)} files)")
+        self._rescan_plans()
+
+    def _do_delete_all_plans(self, plans):
+        total = 0
+        for p in plans:
+            total += len(delete_plan(p))
+        self._set_status(f"Deleted {len(plans)} plans ({total} files)")
+        self._rescan_plans()
+
+    def _rescan_plans(self):
+        self.all_plans = scan_all_plans()
+        self.plan_cursor = min(self.plan_cursor, max(0, len(self.all_plans) - 1))
+
+    # ------------------------------------------------------------------
+    # MCP disable
+    # ------------------------------------------------------------------
+
+    def _disable_project_mcp(self):
+        if self.view == VIEW_PROJECT_DETAIL:
+            proj = self.current_project
+        elif self.view == VIEW_PROJECTS:
+            if not self.projects or self.proj_cursor >= len(self.projects):
+                return
+            proj = self.projects[self.proj_cursor]
+        else:
+            return
+
+        if not proj:
+            return
+
+        data = load_config()
+        json_key = find_json_key_for_dir(data, proj.path)
+        if not json_key:
+            self._set_status("No .claude.json entry for this project")
+            return
+
+        global_servers = set(get_global_mcp_servers(data))
+        local_servers = set(data["projects"][json_key].get("mcpServers", {}).keys())
+        all_servers = sorted(global_servers | local_servers)
+
+        if not all_servers:
+            self._set_status("No MCP servers to disable")
+            return
+
+        self.delete_target = f"Disable MCP servers for: {proj.display_name}"
+        self.delete_path = f"{len(all_servers)} servers: {', '.join(all_servers)}"
+        self.delete_callback = lambda: self._do_disable_mcp(json_key, all_servers, data)
+        self.delete_return_view = self.view
+        self.confirm_title = "Confirm Disable"
+        self._enter_view(VIEW_CONFIRM_DELETE)
+
+    def _disable_all_mcp(self):
+        data = load_config()
+        global_servers = set(get_global_mcp_servers(data))
+        paths = get_project_paths(data)
+
+        if not global_servers:
+            self._set_status("No global MCP servers to disable")
+            return
+
+        self.delete_target = f"Disable MCP servers for all {len(paths)} projects"
+        self.delete_path = f"{len(global_servers)} servers: {', '.join(sorted(global_servers))}"
+        self.delete_callback = lambda: self._do_disable_all_mcp(global_servers, paths, data)
+        self.delete_return_view = VIEW_PROJECTS
+        self.confirm_title = "Confirm Disable All"
+        self._enter_view(VIEW_CONFIRM_DELETE)
+
+    def _do_disable_mcp(self, json_key, servers, data):
+        data["projects"][json_key]["disabledMcpServers"] = servers
+        save_config(data)
+        self.config = data
+        self._set_status(f"Disabled {len(servers)} MCP servers")
+
+    def _do_disable_all_mcp(self, servers, paths, data):
+        for path in paths:
+            data["projects"][path]["disabledMcpServers"] = list(servers)
+        save_config(data)
+        self.config = data
+        self._set_status(f"Disabled {len(servers)} MCP servers for {len(paths)} projects")
 
     # ------------------------------------------------------------------
     # Rendering — Project list
@@ -589,20 +441,28 @@ class CleanerTUI:
             is_cursor = i == self.proj_cursor
             n_convs = len(proj.conversations)
             n_mems = len(proj.memories)
+            n_plans = len(self._get_project_plans(proj.path))
             sz = format_size(proj.total_size)
             marker = "▸ " if is_cursor else "  "
             line = (
-                f" {marker}{proj.display_name:<50.50}"
-                f" {n_convs:3d} convs  {n_mems:2d} mems  {sz:>6s}\n"
+                f" {marker}{proj.display_name:<42.42}"
+                f" {n_convs:3d} convs  {n_mems:2d} mems  {n_plans:2d} plans  {sz:>6s}\n"
             )
-            style = "class:cursor" if is_cursor else ""
+            # Yellow highlight when project has enabled MCP servers
+            has_mcp = self._project_has_enabled_mcp(proj.path)
+            if is_cursor:
+                style = "class:cursor"
+            elif has_mcp:
+                style = "class:mcp"
+            else:
+                style = ""
             lines.append((style, line))
         if not self.projects:
             lines.append(("", "  (no projects found)\n"))
         return lines
 
     # ------------------------------------------------------------------
-    # Rendering — Project detail (conversations & memories in VSplit)
+    # Rendering — Project detail
     # ------------------------------------------------------------------
 
     def _render_conv_list(self):
@@ -627,19 +487,42 @@ class CleanerTUI:
         if not convs:
             lines.append(("", "  (no conversations)\n"))
 
-        total = len(convs)
-        lines.append(("class:footer", f"\n  {total} conversations\n"))
+        lines.append(("class:footer", f"\n  {len(convs)} conversations\n"))
         return lines
 
     def _render_mem_list(self):
         proj = self.current_project
         if not proj:
             return [("", "")]
-        lines = [("class:header", " Memories\n")]
+        lines = [("class:header", " MCP Servers & Memories\n")]
         lines.append(("class:separator", " " + "─" * 28 + "\n"))
 
+        # MCP servers section
+        json_key = find_json_key_for_dir(self.config, proj.path) if self.config else None
+        if json_key:
+            status = get_project_mcp_status(self.config, json_key)
+            local_set = set(status["local"])
+            if status["enabled"]:
+                lines.append(("class:header", " Enabled:\n"))
+                for srv in status["enabled"]:
+                    style = "class:mcp_local" if srv in local_set else "class:mcp_global"
+                    lines.append((style, f"   {srv}\n"))
+            if status["disabled"]:
+                lines.append(("class:detail", " Disabled:\n"))
+                for srv in status["disabled"]:
+                    lines.append(("class:detail", f"   {srv}\n"))
+            if not status["enabled"] and not status["disabled"]:
+                lines.append(("", "  (no MCP servers)\n"))
+        else:
+            lines.append(("", "  (no .claude.json entry)\n"))
+
+        lines.append(("class:separator", " " + "─" * 28 + "\n"))
+
+        # Memories section
         is_active = self.detail_pane == "memories"
         mems = proj.memories
+        if mems:
+            lines.append(("class:header", " Memories\n"))
         for i, mem in enumerate(mems):
             is_cursor = i == self.mem_cursor and is_active
             marker = "▸ " if is_cursor else "  "
@@ -648,11 +531,24 @@ class CleanerTUI:
             lines.append((style, line))
             if is_cursor and mem.description:
                 lines.append(("class:detail", f"    {mem.description[:42]}\n"))
-        if not mems:
-            lines.append(("", "  (no memories)\n"))
 
-        total = len(mems)
-        lines.append(("class:footer", f"\n  {total} memories\n"))
+        lines.append(("class:footer", f"\n  {len(mems)} memories\n"))
+
+        # Plans section
+        plans = self._get_project_plans(proj.path)
+        if plans:
+            lines.append(("class:separator", " " + "─" * 28 + "\n"))
+            lines.append(("class:header", " Plans\n"))
+            for p in plans:
+                if p.status == PLAN_APPROVED:
+                    style = "class:plan_approved"
+                elif p.status == PLAN_CANCELLED:
+                    style = "class:plan_cancelled"
+                else:
+                    style = "class:plan_pending"
+                lines.append((style, f"   {p.slug[:23]}\n"))
+
+        lines.append(("class:footer", f"  {len(plans)} plans\n"))
         return lines
 
     # ------------------------------------------------------------------
@@ -735,15 +631,51 @@ class CleanerTUI:
 
     def _render_confirm_delete(self):
         return [
-            ("class:header", " Confirm Delete\n"),
+            ("class:header", f" {self.confirm_title}\n"),
             ("class:separator", " " + "─" * 80 + "\n"),
             ("", "\n"),
-            ("class:warn", f"  Delete: {self.delete_target}\n"),
+            ("class:warn", f"  {self.delete_target}\n"),
             ("", "\n"),
-            ("class:detail", f"  Path: {self.delete_path}\n"),
+            ("class:detail", f"  {self.delete_path}\n"),
             ("", "\n"),
             ("", "  Press [y] to confirm, [Esc] or [q] to cancel.\n"),
         ]
+
+    # ------------------------------------------------------------------
+    # Rendering — Plans view
+    # ------------------------------------------------------------------
+
+    def _render_plans(self):
+        lines = [("class:header", " Plans Cleanup\n")]
+        lines.append(("class:separator", " " + "─" * 80 + "\n"))
+
+        if not self.all_plans:
+            lines.append(("", "  (no plans found)\n"))
+            return lines
+
+        for i, plan in enumerate(self.all_plans):
+            is_cursor = i == self.plan_cursor
+            ts = format_timestamp_short(plan.timestamp)
+            has_file = "file" if plan.plan_paths else "no file"
+            marker = "▸ " if is_cursor else "  "
+            line = f" {marker}[{plan.status:>9s}]  {plan.slug:<40s}  {plan.project_display:<25s}  {ts}  {has_file}\n"
+
+            if is_cursor:
+                style = "class:cursor"
+            elif plan.status == PLAN_APPROVED:
+                style = "class:plan_approved"
+            elif plan.status == PLAN_CANCELLED:
+                style = "class:plan_cancelled"
+            else:
+                style = "class:plan_pending"
+            lines.append((style, line))
+
+        removable = sum(1 for p in self.all_plans
+                        if p.status in (PLAN_APPROVED, PLAN_CANCELLED) and p.plan_paths)
+        pending = sum(1 for p in self.all_plans if p.status == PLAN_PENDING)
+        lines.append(("class:footer",
+                       f"\n  {len(self.all_plans)} plans | {removable} removable | {pending} pending\n"))
+        return lines
 
     # ------------------------------------------------------------------
     # Main render coordinates
@@ -758,6 +690,8 @@ class CleanerTUI:
             return self._render_memory()
         elif self.view == VIEW_CONFIRM_DELETE:
             return self._render_confirm_delete()
+        elif self.view == VIEW_PLANS:
+            return self._render_plans()
         return [("", "")]
 
     def _render_toolbar(self):
@@ -765,6 +699,17 @@ class CleanerTUI:
             return [
                 ("class:toolbar", " Enter:Open  "),
                 ("class:toolbar", " d:Delete project  "),
+                ("class:toolbar", " D:Disable MCP  "),
+                ("class:toolbar", " Ctrl-D:Disable all  "),
+                ("class:toolbar", " p:Plans cleanup  "),
+                ("class:toolbar", " q:Quit  "),
+                ("class:toolbar", " ↑↓:Navigate  "),
+            ]
+        elif self.view == VIEW_PLANS:
+            return [
+                ("class:toolbar", " d:Delete plan  "),
+                ("class:toolbar", " a:Delete all removable  "),
+                ("class:toolbar", " Esc:Back  "),
                 ("class:toolbar", " q:Quit  "),
                 ("class:toolbar", " ↑↓:Navigate  "),
             ]
@@ -772,7 +717,9 @@ class CleanerTUI:
             return [
                 ("class:toolbar", " Enter:Open  "),
                 ("class:toolbar", " d:Delete  "),
+                ("class:toolbar", " D:Disable MCP  "),
                 ("class:toolbar", " Tab:Switch pane  "),
+                ("class:toolbar", " m:MCP status  "),
                 ("class:toolbar", " 1:Sort date  "),
                 ("class:toolbar", " 2:Sort size  "),
                 ("class:toolbar", " Esc:Back  "),
@@ -821,6 +768,8 @@ class CleanerTUI:
     def _handle_up(self, event):
         if self.view == VIEW_PROJECTS and self.projects:
             self.proj_cursor = max(0, self.proj_cursor - 1)
+        elif self.view == VIEW_PLANS and self.all_plans:
+            self.plan_cursor = max(0, self.plan_cursor - 1)
         elif self.view == VIEW_PROJECT_DETAIL:
             if self.detail_pane == "conversations" and self.current_project:
                 if self.current_project.conversations:
@@ -837,6 +786,8 @@ class CleanerTUI:
     def _handle_down(self, event):
         if self.view == VIEW_PROJECTS and self.projects:
             self.proj_cursor = min(len(self.projects) - 1, self.proj_cursor + 1)
+        elif self.view == VIEW_PLANS and self.all_plans:
+            self.plan_cursor = min(len(self.all_plans) - 1, self.plan_cursor + 1)
         elif self.view == VIEW_PROJECT_DETAIL:
             if self.detail_pane == "conversations" and self.current_project:
                 if self.current_project.conversations:
@@ -877,7 +828,7 @@ class CleanerTUI:
         event.app.invalidate()
 
     def _handle_escape(self, event):
-        if self.view in (VIEW_PROJECT_DETAIL, VIEW_CONVERSATION, VIEW_MEMORY, VIEW_CONFIRM_DELETE):
+        if self.view in (VIEW_PROJECT_DETAIL, VIEW_CONVERSATION, VIEW_MEMORY, VIEW_PLANS, VIEW_CONFIRM_DELETE):
             self._go_back()
         event.app.invalidate()
 
@@ -888,7 +839,9 @@ class CleanerTUI:
             event.app.exit()
 
     def _handle_d(self, event):
-        if self.view in (VIEW_PROJECTS, VIEW_PROJECT_DETAIL, VIEW_CONVERSATION):
+        if self.view == VIEW_PLANS:
+            self._delete_plan_item()
+        elif self.view in (VIEW_PROJECTS, VIEW_PROJECT_DETAIL, VIEW_CONVERSATION):
             self._delete_current_item()
         event.app.invalidate()
 
@@ -902,7 +855,7 @@ class CleanerTUI:
             self.detail_pane = "memories" if self.detail_pane == "conversations" else "conversations"
         event.app.invalidate()
 
-    def _handle_conv_sort(self, key: str, event):
+    def _handle_conv_sort(self, key, event):
         if self.view == VIEW_PROJECT_DETAIL and self.detail_pane == "conversations":
             if self.conv_sort_key == key:
                 self.conv_sort_desc = not self.conv_sort_desc
@@ -910,6 +863,11 @@ class CleanerTUI:
                 self.conv_sort_key = key
                 self.conv_sort_desc = True
             self.conv_cursor = 0
+        event.app.invalidate()
+
+    def _handle_toggle_mcp(self, event):
+        if self.view == VIEW_PROJECT_DETAIL:
+            self.show_mcp = not self.show_mcp
         event.app.invalidate()
 
     # ------------------------------------------------------------------
@@ -920,6 +878,28 @@ class CleanerTUI:
         proj = self.current_project
         if not proj:
             return [("", "")]
+
+        # MCP status mode
+        if self.show_mcp:
+            try:
+                data = load_config()
+                # Find JSON key for this project
+                json_key = find_json_key_for_dir(data, proj.path)
+                if json_key:
+                    status = get_project_mcp_status(data, json_key)
+                    enabled = ",".join(status["enabled"]) or "none"
+                    disabled = ",".join(status["disabled"]) or "none"
+                    return [
+                        ("class:detail.bold", f" MCP servers: "),
+                        ("class:detail", f"enabled:[{enabled}] "),
+                        ("class:warn", f"disabled:[{disabled}]"),
+                    ]
+                else:
+                    return [("class:detail", " No .claude.json entry for this project")]
+            except Exception:
+                return [("class:detail", " Error reading config")]
+
+        # Default: size breakdown
         if self.detail_pane == "conversations" and proj.conversations:
             convs = self._sorted_convs()
             if self.conv_cursor >= len(convs):
@@ -960,7 +940,7 @@ class CleanerTUI:
         )
         mem_frame = Frame(
             mem_window,
-            title=lambda: " Memories " + ("*" if self.detail_pane == "memories" else ""),
+            title=lambda: " MCP & Memories " + ("*" if self.detail_pane == "memories" else ""),
         )
 
         split = VSplit([conv_frame, mem_frame], padding=1, padding_char="│")
@@ -970,12 +950,94 @@ class CleanerTUI:
         )
         return HSplit([split, preview_bar])
 
+    def _render_proj_sidebar(self):
+        if not self.projects or self.proj_cursor >= len(self.projects):
+            return [("", "")]
+        proj = self.projects[self.proj_cursor]
+        lines = [("class:header", f" {proj.display_name}\n")]
+        lines.append(("class:separator", " " + "─" * 28 + "\n"))
+
+        # MCP servers
+        json_key = find_json_key_for_dir(self.config, proj.path) if self.config else None
+        if json_key:
+            status = get_project_mcp_status(self.config, json_key)
+            local_set = set(status["local"])
+            if status["enabled"]:
+                lines.append(("class:header", " MCP enabled:\n"))
+                for srv in status["enabled"]:
+                    style = "class:mcp_local" if srv in local_set else "class:mcp_global"
+                    lines.append((style, f"   {srv}\n"))
+            if status["disabled"]:
+                lines.append(("class:detail", " MCP disabled:\n"))
+                for srv in status["disabled"]:
+                    lines.append(("class:detail", f"   {srv}\n"))
+            if not status["enabled"] and not status["disabled"]:
+                lines.append(("", "  (no MCP servers)\n"))
+        else:
+            lines.append(("", "  (no .claude.json entry)\n"))
+
+        # Memories
+        lines.append(("class:separator", " " + "─" * 28 + "\n"))
+        mems = proj.memories
+        if mems:
+            lines.append(("class:header", f" {len(mems)} memories\n"))
+            for mem in mems[:10]:
+                lines.append(("", f"   {mem.name}\n"))
+            if len(mems) > 10:
+                lines.append(("", f"   ... +{len(mems) - 10} more\n"))
+        else:
+            lines.append(("", "  (no memories)\n"))
+
+        # Plans
+        plans = self._get_project_plans(proj.path)
+        lines.append(("class:separator", " " + "─" * 28 + "\n"))
+        if plans:
+            lines.append(("class:header", f" {len(plans)} plans\n"))
+            for p in plans[:5]:
+                if p.status == PLAN_APPROVED:
+                    style = "class:plan_approved"
+                elif p.status == PLAN_CANCELLED:
+                    style = "class:plan_cancelled"
+                else:
+                    style = "class:plan_pending"
+                lines.append((style, f"   {p.slug[:23]}\n"))
+            if len(plans) > 5:
+                lines.append(("", f"   ... +{len(plans) - 5} more\n"))
+        else:
+            lines.append(("", "  (no plans)\n"))
+
+        # Stats
+        lines.append(("class:separator", " " + "─" * 28 + "\n"))
+        lines.append(("class:footer", f" {len(proj.conversations)} convs\n"))
+        lines.append(("class:footer", f" {format_size(proj.total_size)}\n"))
+        return lines
+
+    def _make_projects_layout(self):
+        proj_list = Window(
+            content=FormattedTextControl(self._render_projects),
+            wrap_lines=False,
+            width=Dimension(weight=4),
+        )
+        sidebar = Window(
+            content=FormattedTextControl(self._render_proj_sidebar),
+            wrap_lines=False,
+            width=Dimension(weight=1),
+        )
+        proj_frame = Frame(proj_list, title=" Projects ")
+        side_frame = Frame(sidebar, title=" Details ")
+        return VSplit([proj_frame, side_frame], padding=1, padding_char="│")
+
     # ------------------------------------------------------------------
     # Run
     # ------------------------------------------------------------------
 
     def run(self):
         self.projects = scan_all_projects()
+        self.all_plans = scan_all_plans()
+        try:
+            self.config = load_config()
+        except Exception:
+            self.config = {}
 
         kb = KeyBindings()
 
@@ -1027,6 +1089,34 @@ class CleanerTUI:
         def _(event):
             self._handle_tab(event)
 
+        @kb.add("m")
+        def _(event):
+            self._handle_toggle_mcp(event)
+
+        @kb.add("p")
+        def _(event):
+            if self.view == VIEW_PROJECTS:
+                self._enter_plans()
+            event.app.invalidate()
+
+        @kb.add("a")
+        def _(event):
+            if self.view == VIEW_PLANS:
+                self._delete_all_removable_plans()
+            event.app.invalidate()
+
+        @kb.add("D")
+        def _(event):
+            if self.view in (VIEW_PROJECTS, VIEW_PROJECT_DETAIL):
+                self._disable_project_mcp()
+            event.app.invalidate()
+
+        @kb.add("c-d")
+        def _(event):
+            if self.view == VIEW_PROJECTS:
+                self._disable_all_mcp()
+            event.app.invalidate()
+
         @kb.add("backspace")
         def _(event):
             self._handle_escape(event)
@@ -1034,9 +1124,13 @@ class CleanerTUI:
         toolbar = Window(content=FormattedTextControl(self._render_toolbar), height=1)
         sep1 = Window(height=1, char="─")
 
-        main_content = ConditionalContainer(
+        projects_content = ConditionalContainer(
+            content=self._make_projects_layout(),
+            filter=Condition(lambda: self.view == VIEW_PROJECTS),
+        )
+        other_content = ConditionalContainer(
             content=Window(content=FormattedTextControl(self._render_main), wrap_lines=False),
-            filter=Condition(lambda: self.view != VIEW_PROJECT_DETAIL),
+            filter=Condition(lambda: self.view not in (VIEW_PROJECTS, VIEW_PROJECT_DETAIL)),
         )
         detail_content = ConditionalContainer(
             content=self._make_detail_layout(),
@@ -1046,12 +1140,18 @@ class CleanerTUI:
         sep2 = Window(height=1, char="─")
         status = Window(content=FormattedTextControl(self._render_status_bar), height=1)
 
-        root = HSplit([toolbar, sep1, main_content, detail_content, sep2, status])
+        root = HSplit([toolbar, sep1, projects_content, other_content, detail_content, sep2, status])
 
         style = Style.from_dict({
             "toolbar": "bg:#d6e4ff #1a2a3a",
             "toolbar.warn": "bg:#ff4444 #ffffff bold",
             "cursor": "reverse",
+            "mcp": "#ffcc00",
+            "mcp_local": "#00cc00 bold",
+            "mcp_global": "#00cccc",
+            "plan_approved": "#00cc00",
+            "plan_cancelled": "#888888",
+            "plan_pending": "#ffcc00",
             "header": "bold",
             "separator": "#808080",
             "detail": "#555555 italic",
