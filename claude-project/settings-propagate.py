@@ -2,20 +2,10 @@
 """Propagate default permissions to all .claude/settings.local.json files."""
 
 import argparse
-import json
 import os
 import sys
 
-
-def load_json(path):
-    with open(path) as f:
-        return json.load(f)
-
-
-def save_json(path, data):
-    with open(path, "w") as f:
-        json.dump(data, f, indent=2, sort_keys=False)
-        f.write("\n")
+from claude_shared import load_json_file, save_json_file
 
 
 def find_settings_files(root):
@@ -34,7 +24,7 @@ def merge_permissions(target_path, default_allow, default_deny, dry_run=False):
     added_deny = []
 
     if os.path.isfile(target_path):
-        data = load_json(target_path)
+        data = load_json_file(target_path)
     else:
         data = {}
 
@@ -58,7 +48,7 @@ def merge_permissions(target_path, default_allow, default_deny, dry_run=False):
             changed = True
 
     if changed and not dry_run:
-        save_json(target_path, data)
+        save_json_file(target_path, data)
 
     return changed, added_allow, added_deny
 
@@ -69,7 +59,7 @@ def merge_skill_overrides(target_path, default_overrides, dry_run=False):
         return False
 
     if os.path.isfile(target_path):
-        data = load_json(target_path)
+        data = load_json_file(target_path)
     else:
         data = {}
 
@@ -79,7 +69,7 @@ def merge_skill_overrides(target_path, default_overrides, dry_run=False):
 
     if not dry_run:
         data["skillOverrides"] = dict(default_overrides)
-        save_json(target_path, data)
+        save_json_file(target_path, data)
 
     return True
 
@@ -102,6 +92,10 @@ def main():
     )
     args = parser.parse_args()
 
+    if not os.path.isdir(args.search_root):
+        print(f"Error: {args.search_root} is not a directory", file=sys.stderr)
+        sys.exit(1)
+
     here = os.path.dirname(os.path.abspath(__file__))
 
     if args.defaults_file:
@@ -113,7 +107,7 @@ def main():
         print(f"Defaults file not found: {defaults_path}", file=sys.stderr)
         sys.exit(1)
 
-    defaults = load_json(defaults_path)
+    defaults = load_json_file(defaults_path)
     default_allow = defaults.get("permissions", {}).get("allow", [])
     default_deny = defaults.get("permissions", {}).get("deny", [])
     default_skill_overrides = defaults.get("skillOverrides", {})

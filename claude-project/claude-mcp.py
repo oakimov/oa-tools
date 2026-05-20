@@ -2,7 +2,6 @@
 """Manage MCP server configuration across projects in .claude.json."""
 
 import argparse
-import importlib.util
 import json
 import os
 import sys
@@ -11,6 +10,7 @@ from claude_shared import (
     PLAN_APPROVED,
     PLAN_CANCELLED,
     PLAN_PENDING,
+    CleanerTUI,
     delete_plan,
     delete_project_unified,
     format_timestamp_short,
@@ -176,20 +176,7 @@ def cmd_clean_plans(data, args):
 
 
 def cmd_tui(data, args):
-    try:
-        import prompt_toolkit  # noqa: F401
-    except ImportError:
-        print("Error: prompt_toolkit is required for TUI mode.", file=sys.stderr)
-        print("Install with: pip install prompt_toolkit", file=sys.stderr)
-        sys.exit(1)
-
-    here = os.path.dirname(os.path.abspath(__file__))
-    spec = importlib.util.spec_from_file_location(
-        "claude_cleaner", os.path.join(here, "claude-cleaner.py")
-    )
-    mod = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(mod)
-    mod.CleanerTUI().run()
+    CleanerTUI().run()
 
 
 def main():

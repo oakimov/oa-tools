@@ -4,7 +4,27 @@ Tools for managing Claude Code project data.
 
 ## Architecture
 
-Shared logic lives in `claude_shared.py` (constants, config I/O, path encoding, data scanning, unified deletion). Both `claude-mcp.py` and `claude-cleaner.py` import from it.
+| File | Purpose |
+|------|---------|
+| `claude_shared.py` | Shared library: constants, config I/O, path encoding, data model, scanning, deletion, and the `CleanerTUI` class. All other scripts import from here. TUI dependencies (`prompt_toolkit`) are guarded — non-TUI commands work without it. |
+| `claude-mcp.py` | CLI for MCP server management and project cleanup. Imports `CleanerTUI` directly for the `tui` subcommand. |
+| `claude-cleaner.py` | Thin entry point (3 lines) that calls `CleanerTUI().run()`. Kept for direct execution (`python claude-cleaner.py`). |
+| `settings-propagate.py` | Propagates default permissions and skill overrides to all `.claude/settings.local.json` files. Uses shared JSON I/O from `claude_shared.py`. |
+| `settings.local.json` | Canonical defaults file used by `settings-propagate.py`. |
+
+## Guard Rules: cc-safety-net
+
+Dangerous commands (`git push --force`, `git reset --hard`, `find -delete`, `rm -rf` outside cwd, shell wrappers, interpreter one-liners) are blocked by the [cc-safety-net](https://github.com/kenryu42/claude-code-safety-net) plugin (1.3k stars, active).
+
+Install once, applies to all projects:
+
+```
+/plugin marketplace add kenryu42/cc-marketplace
+/plugin install safety-net@cc-marketplace
+/reload-plugins
+```
+
+Custom rules (user-wide, central location): `~/.cc-safety-net/config.json`. Run `npx cc-safety-net doctor` to verify installation.
 
 ## claude-mcp.py
 
@@ -21,11 +41,13 @@ CLI for managing MCP server configuration in `.claude.json` and project cleanup.
 | `clean-plans` | Remove approved and cancelled plan files across all projects |
 | `tui` | Launch interactive cleaner TUI |
 
-## claude-cleaner.py
+## CleanerTUI (in claude_shared.py)
 
 Cross-project session, memory, and plan browser/cleanup TUI. Scans all projects
 in `~/.claude/projects/` and provides a keyboard-driven interface to browse and
 delete conversations, memories, plans, and entire project directories.
+
+Launched via `claude-mcp.py tui` or `python claude-cleaner.py`.
 
 ### Views
 
@@ -58,9 +80,23 @@ delete conversations, memories, plans, and entire project directories.
 | `Esc` / `Backspace` | everywhere | Go back |
 | `q` | everywhere | Quit |
 
-### Unified deletion
+## settings-propagate.py
 
-Both tools perform the same unified deletion when removing a project:
+Propagates a canonical `settings.local.json` (permissions and skill overrides) to all `.claude/settings.local.json` files under a directory tree.
+
+```
+python settings-propagate.py [--dry-run] [--defaults-file PATH] [search_root]
+```
+
+- `search_root`: directory to scan (default: `~`)
+- `--defaults-file`: JSON file with canonical settings (default: `settings.local.json` next to script)
+- `--dry-run`: show what would change without writing
+
+Permissions are merged (additive — new entries added, existing preserved). Skill overrides are replaced entirely with the defaults.
+
+## Unified deletion
+
+Both the CLI and TUI perform the same unified deletion when removing a project:
 - Removes the entry from `~/.claude.json`
 - Removes the project directory under `~/.claude/projects/`
 - Cleans session artifacts in `~/.claude/session-env/`, `~/.claude/file-history/`, and `~/.claude/sessions/`
@@ -68,9 +104,9 @@ Both tools perform the same unified deletion when removing a project:
 
 Conversation deletion removes the `.jsonl` file, its `{uuid}/` subdirectory (subagents, tool-results), all associated session artifacts, and the plan file for that conversation's slug.
 
-Memory deletion removes the individual `.md` file from the project's `memory/` directory.
+Memory deletion removes the individual `.md` file from the project's `memory/` directory. Path containment is verified before deletion.
 
-### Plan status
+## Plan status
 
 Plans are derived from the last `ExitPlanMode` tool call per plan slug across all sessions:
 
@@ -80,47 +116,12 @@ Plans are derived from the last `ExitPlanMode` tool call per plan slug across al
 | **cancelled** | Plan mode exited with empty input | Removable |
 | **pending** | Plan presented but not yet approved or rejected | Kept |
 
-## Guard rules (PreToolUse hooks)
+## Safety
 
-The `guard-rules.py` script and `.md` files are PreToolUse hooks that block dangerous commands before Claude Code's permission system is consulted. Unlike deny-list patterns in `settings.local.json`, these can't be bypassed by reordering flags or using alternative syntax.
-
-| File | Blocks |
-|------|--------|
-| `guard-rules.py` | Evaluates guard rules, exits 2 to block |
-| `hookify.guard-find.md` | `find` with `-exec`, `-execdir`, or `-delete` |
-| `hookify.guard-git.md` | `git commit`, `git push`, `git reset --hard` |
-
-### Setup
-
-1. Copy the hook script and rule files to `~/.claude/`:
-```
-cp guard-rules.py ~/.claude/hooks/
-cp hookify.guard-*.md ~/.claude/
-```
-
-2. Register the PreToolUse hook in `~/.claude/settings.json`:
-```json
-"hooks": {
-  "PreToolUse": [{"hooks": [{"type": "command", "command": "python3 ~/.claude/hooks/guard-rules.py", "timeout": 5}]}]
-}
-```
-
-3. The rules are active immediately on the next tool use — no restart needed.
-
-### Rule format
-
-Rule files use YAML frontmatter with conditions:
-```yaml
----
-name: rule-name
-enabled: true
-event: bash
-action: block
-conditions:
-  - field: command
-    operator: regex_match
-    pattern: \bgit\b.*\b(commit|push)\b
----
-```
-
-Supported operators: `regex_match`, `contains`, `equals`, `starts_with`, `ends_with`.
+- `load_config()` handles missing `.claude.json` gracefully (returns `{}`) and raises with context for corrupt JSON
+- Path containment checks (`_is_within`) guard all file deletions against path traversal
+- Plan file deletion validates paths resolve within `~/.claude/plans/` or `~/.claude/projects/`
+- Memory deletion validates paths resolve within `~/.claude/projects/`
+- TOCTOU protection in project rescanning (handles files deleted between listing and access)
+- `settings-propagate.py` validates `search_root` exists before walking
+- Scan failures log warnings to stderr instead of silently swallowing exceptions
