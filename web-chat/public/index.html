@@ -33,6 +33,7 @@
       <select id="providerSelect">
         <option value="openai">OpenAI</option>
         <option value="anthropic">Anthropic</option>
+        <option value="google">Google Gemini</option>
         <option value="responses">OpenAI Responses</option>
       </select>
     </div>
@@ -60,7 +61,7 @@
     <div class="field">
       <label for="topK">Top K</label>
       <div class="range-row">
-        <input type="range" id="topK" min="0" max="100" step="1" value="0">
+        <input type="range" id="topK" min="0" max="100" step="1" value="40">
         <span class="range-val" id="topKVal">40</span>
       </div>
     </div>

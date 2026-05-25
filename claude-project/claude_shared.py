@@ -214,6 +214,7 @@ def scan_conversation(path: str) -> ConversationInfo:
                     ts = obj["timestamp"]
     except Exception as e:
         print(f"Warning: failed to scan {path}: {e}", file=sys.stderr)
+    chat_sz = os.path.getsize(path)
     subagent_sz = 0
     tool_sz = 0
     conv_dir = os.path.splitext(path)[0]

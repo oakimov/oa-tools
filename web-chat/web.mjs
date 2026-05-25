@@ -31,20 +31,46 @@ const MIME = {
   '.ico': 'image/x-icon',
 };
 
+const MAX_BODY_BYTES = 1 * 1024 * 1024;
+
 // ── Helper: parse JSON body ───────────────────────────────────────────────────
 
 function parseBody(req) {
   return new Promise((resolve, reject) => {
     const chunks = [];
-    req.on('data', c => chunks.push(c));
+    let total = 0;
+    let settled = false;
+
+    req.on('data', c => {
+      if (settled) return;
+      total += c.length;
+      if (total > MAX_BODY_BYTES) {
+        settled = true;
+        const err = new Error('Request body too large');
+        err.statusCode = 413;
+        reject(err);
+        return;
+      }
+      chunks.push(c);
+    });
+
     req.on('end', () => {
+      if (settled) return;
       try {
         resolve(JSON.parse(Buffer.concat(chunks).toString()));
-      } catch (e) {
-        reject(new Error('Invalid JSON'));
+      } catch {
+        settled = true;
+        const err = new Error('Invalid JSON');
+        err.statusCode = 400;
+        reject(err);
       }
     });
-    req.on('error', reject);
+
+    req.on('error', (err) => {
+      if (settled) return;
+      settled = true;
+      reject(err);
+    });
   });
 }
 
@@ -60,9 +86,11 @@ async function handleChat(req, res) {
   let body;
   try {
     body = await parseBody(req);
-  } catch {
-    res.writeHead(400, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ error: 'Invalid JSON body' }));
+  } catch (err) {
+    const status = err?.statusCode || 400;
+    const error = status === 413 ? 'Request body too large (max 1MB)' : 'Invalid JSON body';
+    res.writeHead(status, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error }));
     return;
   }
 
@@ -111,7 +139,7 @@ async function handleChat(req, res) {
         fullText += chunk;
         sseWrite(res, 'delta', { text: chunk });
       }
-      sseWrite(res, 'done', { text: fullText });
+      sseWrite(res, 'done', {});
     } catch (err) {
       sseWrite(res, 'error', { message: err.message });
     }

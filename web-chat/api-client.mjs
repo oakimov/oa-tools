@@ -14,6 +14,9 @@ export const DEFAULT_TIMEOUT = 120_000;
 
 export function buildHeaders(config) {
   const base = { 'Content-Type': 'application/json', Accept: 'application/json' };
+  if (config.provider === 'google') {
+    return { ...base, 'x-goog-api-key': config.apiKey };
+  }
   if (config.provider === 'anthropic') {
     return {
       ...base,
@@ -25,7 +28,28 @@ export function buildHeaders(config) {
   return { ...base, Authorization: `Bearer ${config.apiKey}` };
 }
 
+export function googleEndpoint(model, stream) {
+  const base = 'https://generativelanguage.googleapis.com/v1';
+  return stream
+    ? `${base}/models/${model}:streamGenerateContent?alt=sse`
+    : `${base}/models/${model}:generateContent`;
+}
+
 export function buildPayload(config, messages) {
+  const topK = Number.isInteger(config.topK) && config.topK >= 0 ? config.topK : null;
+  if (config.provider === 'google') {
+    const contents = messages.map(m => ({
+      role: m.role === 'assistant' ? 'model' : 'user',
+      parts: [{ text: m.content }],
+    }));
+    const payload = { contents };
+    if (config.system) payload.systemInstruction = { parts: [{ text: config.system }] };
+    payload.generationConfig = {};
+    if (config.temperature != null) payload.generationConfig.temperature = config.temperature;
+    if (config.maxTokens != null) payload.generationConfig.maxOutputTokens = config.maxTokens;
+    if (topK != null) payload.generationConfig.topK = topK;
+    return payload;
+  }
   if (config.provider === 'anthropic') {
     return {
       model: config.model,
@@ -33,7 +57,7 @@ export function buildPayload(config, messages) {
       messages,
       system: config.system ?? DEFAULT_SYSTEM,
       ...(config.temperature != null ? { temperature: config.temperature } : {}),
-      ...(config.topK != null ? { top_k: config.topK } : {}),
+      ...(topK != null ? { top_k: topK } : {}),
       ...(config.stream ? { stream: true } : {}),
     };
   }
@@ -46,7 +70,6 @@ export function buildPayload(config, messages) {
       input,
       text: { format: { type: 'text' } },
       ...(config.temperature != null ? { temperature: config.temperature } : {}),
-      ...(config.topK != null ? { top_k: config.topK } : {}),
       ...(config.stream ? { stream: true } : {}),
     };
   }
@@ -59,7 +82,6 @@ export function buildPayload(config, messages) {
       ...(config.system ? [{ role: 'system', content: config.system }] : []),
       ...messages,
     ],
-    ...(config.topK != null ? { top_k: config.topK } : {}),
     stream: config.stream ?? true,
   };
 }
@@ -67,7 +89,8 @@ export function buildPayload(config, messages) {
 export async function chatNonStreaming(config, messages) {
   const payload = buildPayload(config, messages);
   const headers = buildHeaders(config);
-  const response = await fetch(config.url, {
+  const endpoint = config.provider === 'google' ? googleEndpoint(config.model, false) : config.url;
+  const response = await fetch(endpoint, {
     method: 'POST',
     headers,
     body: JSON.stringify(payload),
@@ -78,6 +101,9 @@ export async function chatNonStreaming(config, messages) {
     throw new Error(`API error ${response.status}: ${errorText}`);
   }
   const data = await response.json();
+  if (config.provider === 'google') {
+    return { text: data.candidates?.[0]?.content?.parts?.[0]?.text || '', data };
+  }
   if (config.provider === 'anthropic') {
     return { text: data.content?.[0]?.text || '', data };
   }
@@ -90,11 +116,12 @@ export async function chatNonStreaming(config, messages) {
 export async function* chatStreaming(config, messages) {
   const payload = buildPayload(config, messages);
   const headers = buildHeaders(config);
-  if (config.provider === 'anthropic') {
+  if (config.provider === 'google' || config.provider === 'anthropic') {
     headers['Accept'] = 'text/event-stream';
   }
 
-  const response = await fetch(config.url, {
+  const endpoint = config.provider === 'google' ? googleEndpoint(config.model, true) : config.url;
+  const response = await fetch(endpoint, {
     method: 'POST',
     headers,
     body: JSON.stringify(payload),
@@ -123,7 +150,20 @@ export async function* chatStreaming(config, messages) {
         const trimmed = line.trim();
         if (!trimmed) continue;
 
-        if (config.provider === 'anthropic') {
+        if (config.provider === 'google') {
+          if (trimmed.startsWith('data: ')) {
+            const jsonStr = trimmed.slice(6);
+            if (jsonStr === '[DONE]') return;
+            try {
+              const obj = JSON.parse(jsonStr);
+              if (obj.error) throw new Error(obj.error.message || 'Google API error');
+              const text = obj.candidates?.[0]?.content?.parts?.[0]?.text;
+              if (text) yield text;
+            } catch (e) {
+              if (!(e instanceof SyntaxError)) throw e;
+            }
+          }
+        } else if (config.provider === 'anthropic') {
           if (trimmed.startsWith('data: ')) {
             const jsonStr = trimmed.slice(6);
             if (jsonStr === '[DONE]') return;
@@ -170,6 +210,7 @@ export async function* chatStreaming(config, messages) {
 export function detectProvider(url) {
   if (!url) return 'openai';
   const u = url.toLowerCase();
+  if (u.includes('googleapis.com') || u.includes('generativelanguage')) return 'google';
   if (u.includes('anthropic.com')) return 'anthropic';
   if (u.includes('/responses')) return 'responses';
   if (u.includes('openai.com') || u.includes('api.openai')) return 'openai';

@@ -32,6 +32,7 @@ const KNOWN_ENDPOINTS = {
   openai: 'https://api.openai.com/v1/chat/completions',
   anthropic: 'https://api.anthropic.com/v1/messages',
   responses: 'https://api.openai.com/v1/responses',
+  google: 'https://generativelanguage.googleapis.com',
 };
 
 // npm package → known API base URL (for providers missing base_url in catalog)
@@ -88,6 +89,7 @@ function completeEndpoint(pid, mid) {
 function detectProviderFromUrl(url) {
   if (!url) return null;
   const u = url.toLowerCase();
+  if (u.includes('googleapis.com') || u.includes('generativelanguage')) return 'google';
   if (u.includes('anthropic.com')) return 'anthropic';
   if (u.includes('/responses')) return 'responses';
   if (u.includes('openai.com')) return 'openai';
@@ -113,6 +115,8 @@ function updateProviderFromUrl(url) {
   el.providerSelect.value = pid;
   populateModelSelect(pid);
   updateApiKeyHint(pid);
+  const firstModel = [...el.modelSelect.options].find(o => o.value);
+  if (firstModel && !el.modelInput.value) el.modelInput.value = firstModel.value;
 }
 
 function populateModelSelect(providerId) {
@@ -135,9 +139,6 @@ function populateModelSelect(providerId) {
       opt.textContent = m.name;
       sel.appendChild(opt);
     }
-    if (!el.modelInput.value) {
-      el.modelInput.value = sorted[0].id;
-    }
   }
 }
 function onProviderChange() {
@@ -146,6 +147,8 @@ function onProviderChange() {
   populateModelSelect(pid);
   updateApiKeyHint(pid);
   autoFillApiKey(pid);
+  const firstModel = [...el.modelSelect.options].find(o => o.value);
+  if (firstModel) el.modelInput.value = firstModel.value;
   saveSettings();
 }
 
@@ -177,6 +180,7 @@ const KNOWN_ENV_HINTS = {
   openai: 'OPENAI_API_KEY',
   anthropic: 'ANTHROPIC_API_KEY',
   responses: 'OPENAI_API_KEY',
+  google: 'GOOGLE_API_KEY',
 };
 
 function updateApiKeyHint(pid) {
@@ -248,11 +252,33 @@ function showError(msg) {
   bubble.closest('.msg').classList.add('error');
 }
 
+function showWarning(msg) {
+  const { bubble } = addMessage('assistant', '\u26a0\ufe0f ' + msg);
+  bubble.closest('.msg').classList.add('error');
+}
+
+function parseTopKInput(raw) {
+  const trimmed = String(raw ?? '').trim();
+  if (!trimmed) return null;
+  const value = Number.parseInt(trimmed, 10);
+  return Number.isNaN(value) ? null : value;
+}
+
 async function loadCatalog() {
   try {
     const res = await fetch('/api/providers');
+    if (!res.ok) {
+      throw new Error(`Providers request failed with HTTP ${res.status}`);
+    }
+    const contentType = (res.headers.get('content-type') || '').toLowerCase();
+    if (!contentType.includes('application/json')) {
+      throw new Error('Providers response was not JSON');
+    }
     const data = await res.json();
-    state.providers = data.providers || [];
+    if (!data || !Array.isArray(data.providers)) {
+      throw new Error('Providers payload is invalid');
+    }
+    state.providers = data.providers;
     const sorted = [...state.providers].filter(p => p.id && p.name).sort((a, b) => a.name.localeCompare(b.name));
     for (const p of sorted) {
       if (![...el.providerSelect.options].some(o => o.value === p.id)) {
@@ -265,7 +291,10 @@ async function loadCatalog() {
     populateModelSelect(el.providerSelect.value);
     updateApiKeyHint(el.providerSelect.value);
     if (el.apiUrl.value) updateProviderFromUrl(el.apiUrl.value);
-  } catch {}
+  } catch (err) {
+    console.error('Failed to load providers catalog:', err);
+    showWarning('Model catalog unavailable; using built-in providers only.');
+  }
 }
 
 async function sendMessage() {
@@ -275,7 +304,8 @@ async function sendMessage() {
   const apiKey = el.apiKey.value.trim();
   if (!url || !apiKey) { showError('Enter API endpoint and API key in settings.'); return; }
   const model = el.modelInput.value.trim() || el.modelSelect.value || 'gpt-4o';
-  const config = { url, apiKey, provider: el.providerSelect.value, model, temperature: parseFloat(el.temperature.value), topK: parseInt(el.topK.value, 10) || 40, maxTokens: parseInt(el.maxTokens.value, 10) || 4096, system: el.systemPrompt.value.trim() || '', stream: true };
+  const topK = parseTopKInput(el.topK.value);
+  const config = { url, apiKey, provider: el.providerSelect.value, model, temperature: parseFloat(el.temperature.value), topK, maxTokens: parseInt(el.maxTokens.value, 10) || 4096, system: el.systemPrompt.value.trim() || '', stream: true };
   addMessage('user', text);
   el.messageInput.value = '';
   el.messageInput.style.height = 'auto';
@@ -286,33 +316,53 @@ async function sendMessage() {
   state.messages.push({ role: 'user', content: text });
   const messages = state.messages.slice();
   const { bubble } = addMessage('assistant', '', true);
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(new Error('Request timed out')), 120000);
   try {
-    const res = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...config, messages }) });
+    const res = await fetch('/api/chat', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...config, messages }), signal: controller.signal });
     if (!res.ok) { const err = await res.json().catch(() => ({ error: res.statusText })); throw new Error((err.error || res.statusText) + " (HTTP " + res.status + ")"); }
+    if (!res.body) throw new Error('No response stream received from server');
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buf = '', full = '';
+    const processLine = (line) => {
+      const t = line.trim();
+      if (!t.startsWith('data: ')) return;
+      try {
+        const ev = JSON.parse(t.slice(6));
+        if (ev.text !== undefined) { full += ev.text; updateStreamingMessage(bubble, full); }
+        if (ev.message) throw new Error(ev.message);
+      } catch (e) {
+        if (!(e instanceof SyntaxError)) throw e;
+      }
+    };
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
       buf += decoder.decode(value, { stream: true });
       const lines = buf.split('\n');
       buf = lines.pop() || '';
-      for (const line of lines) {
-        const t = line.trim();
-        if (t.startsWith('data: ')) {
-          try {
-            const ev = JSON.parse(t.slice(6));
-            if (ev.text !== undefined) { full += ev.text; updateStreamingMessage(bubble, full); }
-            if (ev.message) throw new Error(ev.message);
-          } catch(e) { if (!(e instanceof SyntaxError)) throw e; }
-        }
-      }
+      for (const line of lines) processLine(line);
     }
+    buf += decoder.decode();
+    if (buf.trim()) processLine(buf);
     finalizeStreaming(bubble.closest('.msg'));
     state.messages.push({ role: 'assistant', content: full });
-  } catch (err) { showError(err.message); finalizeStreaming(bubble.closest('.msg')); }
-  finally { state.streaming = false; el.sendBtn.disabled = false; el.sendBtn.classList.remove('loading'); el.sendBtn.textContent = '\u27a4'; el.messageInput.focus(); }
+  } catch (err) {
+    if (err.name === 'AbortError') {
+      showError('Request timed out after 120 seconds.');
+    } else {
+      showError(err.message);
+    }
+    finalizeStreaming(bubble.closest('.msg'));
+  } finally {
+    clearTimeout(timeout);
+    state.streaming = false;
+    el.sendBtn.disabled = false;
+    el.sendBtn.classList.remove('loading');
+    el.sendBtn.textContent = '\u27a4';
+    el.messageInput.focus();
+  }
 }
 
 function autoResize() {
