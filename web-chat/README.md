@@ -132,7 +132,11 @@ curl http://localhost:4000/v1/chat/completions \
 2. Start the web UI: `node web.mjs` (different terminal)
 3. In the web UI settings, set URL to `http://localhost:4000/v1/chat/completions` and any placeholder for API key
 
-**Token persistence:** The token is cached in `~/.qwen-token.json`. It persists across restarts and is automatically discarded when the upstream returns a 401 (expired).
+**Token validation and auto-refresh:**
+- On submission, the token is validated against `qwen.aikit.club/v1/validate` — the returned (potentially refreshed) token is saved, not the raw input.
+- The proxy runs a background check every 30 minutes. If the token's JWT `exp` is within 6 hours, it calls `qwen.aikit.club/v1/refresh` to extend the session.
+- On a 401 response from the upstream, the proxy attempts one refresh before declaring the token expired.
+- The token is cached in `~/.qwen-token.json` and persists across restarts.
 
 ## Files
 
