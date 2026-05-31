@@ -48,5 +48,8 @@ coverage.xml
 .env
 .env.*
 
+# Node.js
+node_modules/
+
 # Extracted archives (runtime output)
 *.extracted/

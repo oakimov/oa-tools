@@ -231,7 +231,8 @@ function addMessage(role, text, isStreaming) {
   avatar.textContent = role === 'user' ? 'U' : 'A';
   const bubble = document.createElement('div');
   bubble.className = 'bubble';
-  bubble.textContent = text;
+  // Render markdown if available, fallback to plain text
+  bubble.innerHTML = typeof marked !== 'undefined' ? marked.parse(text) : text;
   div.append(avatar, bubble);
   el.emptyState.style.display = 'none';
   el.chatInner.appendChild(div);
@@ -240,7 +241,8 @@ function addMessage(role, text, isStreaming) {
 }
 
 function updateStreamingMessage(bubble, text) {
-  bubble.textContent = text;
+  // Render markdown for streaming updates as they accumulate
+  bubble.innerHTML = typeof marked !== 'undefined' ? marked.parse(text) : text;
   const c = el.chatInner.parentElement;
   if (c.scrollHeight - c.scrollTop - c.clientHeight < 100) c.scrollTop = c.scrollHeight;
 }
