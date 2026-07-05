@@ -5,6 +5,18 @@ by Claude Code, Cursor, Codex CLI, and OpenCode. All four tools share the same
 navigation model — **project list → conversation/session list → message
 deep-dive** — and the same look, built on a common TUI toolkit.
 
+## Screenshots
+
+**Conversation list** (Claude Code, project detail view — conversations on
+the left, MCP servers/memories/plans on the right):
+
+![Conversation list](assets/conversation-list.png)
+
+**Message viewer** (tool calls and their results rendered inline, not just
+prose text):
+
+![Message viewer](assets/message-viewer.png)
+
 ## Architecture
 
 | File | Purpose |
