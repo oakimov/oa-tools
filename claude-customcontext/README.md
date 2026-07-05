@@ -1,6 +1,6 @@
 # Claude Custom Context
 
-Shell scripts that parse Claude Code's status JSON (`$HOME/.claude/status.json`) and display a **context window usage bar** with model name and percentage — designed for shell prompt integration.
+Shell scripts that parse Claude Code's status JSON (`$HOME/.claude/status.json`) and display a **context window usage bar** with model name and percentage — designed as a `statusLine` command in Claude Code's settings.
 
 ## Files
 
@@ -12,19 +12,19 @@ Shell scripts that parse Claude Code's status JSON (`$HOME/.claude/status.json`)
 
 ## Quick Start
 
-### Bash (zsh prompt)
-```zsh
-# ~/.zshrc
-setopt prompt_subst
-PR_GIT='$(git rev-parse --abbrev-ref HEAD 2>/dev/null)'
-RPROMPT='$(echo $(cat $HOME/.claude/status.json) | jq -c . | ~/path/to/statusline.sh)'
+Add to `~/.claude/settings.json`:
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "pwsh -NoLogo -File \"$HOME/.claude/statusline.ps1\"",
+    "padding": 2
+  }
+}
 ```
 
-### PowerShell
-```powershell
-# $PROFILE
-function prompt { "$( $input | ...\statusline.ps1 ) >" }
-```
+For bash (requires `jq`), point the command at `statusline.sh` instead.
 
 ## How it works
 
