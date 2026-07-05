@@ -3,39 +3,27 @@
 
 import argparse
 import json
-import os
 import sys
 
-from claude_shared import (
-    PLAN_APPROVED,
-    PLAN_CANCELLED,
-    PLAN_PENDING,
-    CleanerTUI,
-    delete_plan,
-    delete_project_unified,
-    format_timestamp_short,
-    get_global_mcp_servers,
-    get_project_paths,
-    is_project_key,
-    load_config,
-    save_config,
-    scan_all_plans,
-)
+import claude_backend as backend
+from claude_backend import PLAN_APPROVED, PLAN_CANCELLED, PLAN_PENDING
+from claude_tui import ClaudeCleanerTUI
+from common import format_date_short
 
 
 def cmd_list(data, args):
-    for path in get_project_paths(data):
+    for path in backend.get_project_paths(data):
         print(path)
 
 
 def cmd_delete(data, args):
     project_path = args.project_path
     projects = data.setdefault("projects", {})
-    if project_path not in projects or not is_project_key(project_path):
+    if project_path not in projects or not backend.is_project_key(project_path):
         print(f"Project not found: {project_path}")
         sys.exit(1)
 
-    result = delete_project_unified(project_path)
+    result = backend.delete_project_unified(project_path)
     if result["config_deleted"]:
         print(f"Deleted config entry: {project_path}")
     else:
@@ -67,8 +55,8 @@ def _format_server_list(servers, local_set):
 
 
 def cmd_show_enabled(data, args):
-    global_servers = set(get_global_mcp_servers(data))
-    for path in get_project_paths(data):
+    global_servers = set(backend.get_global_mcp_servers(data))
+    for path in backend.get_project_paths(data):
         project = data["projects"][path]
         local_servers = set(project.get("mcpServers", {}).keys())
         disabled = set(project.get("disabledMcpServers", []))
@@ -90,11 +78,15 @@ def cmd_show_enabled(data, args):
 
 def cmd_clean(data, args):
     projects = data.setdefault("projects", {})
-    if args.project_path in projects and is_project_key(args.project_path):
+    if args.project_path in projects and backend.is_project_key(args.project_path):
+        answer = input(f"Reset MCP config for {args.project_path}? [y/N] ").strip().lower()
+        if answer != "y":
+            print("Cancelled.")
+            return
         project = projects[args.project_path]
         project["mcpServers"] = {}
         project["disabledMcpServers"] = []
-        save_config(data)
+        backend.save_config(data)
         print(f"Cleaned project: {args.project_path}")
     else:
         print(f"Project not found: {args.project_path}")
@@ -102,25 +94,29 @@ def cmd_clean(data, args):
 
 
 def cmd_disable_all(data, args):
-    global_servers = get_global_mcp_servers(data)
+    global_servers = backend.get_global_mcp_servers(data)
     projects = data.setdefault("projects", {})
     count = 0
-    for path in get_project_paths(data):
+    for path in backend.get_project_paths(data):
         projects[path]["disabledMcpServers"] = list(global_servers)
         count += 1
-    save_config(data)
+    answer = input(f"Disable all MCP servers for {count} projects? [y/N] ").strip().lower()
+    if answer != "y":
+        print("Cancelled.")
+        return
+    backend.save_config(data)
     print(f"Disabled all MCP servers for {count} projects")
 
 
 def cmd_disable(data, args):
-    global_servers = set(get_global_mcp_servers(data))
+    global_servers = set(backend.get_global_mcp_servers(data))
     projects = data.setdefault("projects", {})
-    if args.project_path in projects and is_project_key(args.project_path):
+    if args.project_path in projects and backend.is_project_key(args.project_path):
         project = projects[args.project_path]
         local_servers = set(project.get("mcpServers", {}).keys())
         disabled = sorted(global_servers | local_servers)
         project["disabledMcpServers"] = disabled
-        save_config(data)
+        backend.save_config(data)
         print(f"Disabled MCP servers for: {args.project_path}")
     else:
         print(f"Project not found: {args.project_path}")
@@ -128,7 +124,7 @@ def cmd_disable(data, args):
 
 
 def cmd_clean_plans(data, args):
-    plans = scan_all_plans()
+    plans = backend.scan_all_plans()
     if not plans:
         print("No plans found.")
         return
@@ -139,7 +135,7 @@ def cmd_clean_plans(data, args):
     if removable:
         print("Plans that can be removed:\n")
         for p in removable:
-            ts = format_timestamp_short(p.timestamp)
+            ts = format_date_short(p.timestamp)
             has_file = "file" if p.plan_paths else "no file"
             print(f"  [{p.status:>9s}]  {p.slug:<40s}  {p.project_display:<30s}  {ts}  {has_file}")
         print()
@@ -147,7 +143,7 @@ def cmd_clean_plans(data, args):
     if keep:
         print("Plans to keep (pending):\n")
         for p in keep:
-            ts = format_timestamp_short(p.timestamp)
+            ts = format_date_short(p.timestamp)
             has_file = "file" if p.plan_paths else "no file"
             print(f"  [{p.status:>9s}]  {p.slug:<40s}  {p.project_display:<30s}  {ts}  {has_file}")
         print()
@@ -168,7 +164,7 @@ def cmd_clean_plans(data, args):
 
     total = 0
     for p in with_files:
-        removed = delete_plan(p)
+        removed = backend.delete_plan(p)
         total += len(removed)
         for path in removed:
             print(f"  Deleted: {path}")
@@ -176,7 +172,7 @@ def cmd_clean_plans(data, args):
 
 
 def cmd_tui(data, args):
-    CleanerTUI().run()
+    ClaudeCleanerTUI().run()
 
 
 def main():
@@ -225,7 +221,7 @@ def main():
     p_plans.set_defaults(func=cmd_clean_plans)
 
     args = parser.parse_args()
-    data = load_config()
+    data = backend.load_config()
     if args.command is None:
         args.verbose = False
         cmd_show_enabled(data, args)

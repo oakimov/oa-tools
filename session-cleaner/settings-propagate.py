@@ -5,7 +5,7 @@ import argparse
 import os
 import sys
 
-from claude_shared import load_json_file, save_json_file
+from common import load_json_file, save_json_file
 
 
 def find_settings_files(root):
