@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-19  
 **Sources:**
-- OpenCode local checkout: `/Users/mitra/Projects/opencode-research` (anomalyco/opencode, `dev` branch)
+- OpenCode local checkout: `*/Projects/opencode-research` (anomalyco/opencode, `dev` branch)
 - MiMo Code: https://github.com/XiaomiMiMo/MiMo-Code (v0.1.x line, MIT + use restrictions)
 **MiMo claim (README):** fork of OpenCode that keeps core capabilities and adds long-horizon harness features.
 
