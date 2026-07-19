@@ -54,3 +54,9 @@ coverage.xml
 
 # Extracted archives (runtime output)
 *.extracted/
+
+# Agent / browser tooling artifacts
+.playwright-mcp/
+.firecrawl/
+.puppeteer-mcp/
+.browser-mcp/

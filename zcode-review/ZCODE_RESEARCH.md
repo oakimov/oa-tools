@@ -1,7 +1,7 @@
-# ZCode 3.2.5 — Research Summary
+# ZCode — Research Summary
 
-**Date:** 2026-07-03
-**Source:** Reverse engineering of the ZCode 3.2.5 macOS ARM64 application bundle
+**Date:** 2026-07-03 (base audit of 3.2.5); §7 plugin ABI follow-up 2026-07-19 (3.3.6)
+**Source:** Reverse engineering of the ZCode macOS ARM64 application bundle (initially 3.2.5; plugin notes against 3.3.6 / `zcode-cli` 0.15.2)
 **Application ID:** `dev.zcode.app`
 **Developer:** Z.AI / Zhipu (智谱) — China-based AI company
 
@@ -326,3 +326,168 @@ ZCode can integrate with these external CLI tools:
 | **Default providers** | All Chinese (Z.AI, Zhipu, DeepSeek, Qwen, Moonshot, MiniMax, Xiaomi) |
 | **Privacy controls** | None found |
 | **Process monitoring** | Self-only (app's own processes), not system-wide |
+| **Plugin ABI** | Claude-/Codex-style marketplace (`.zcode-plugin`), **not** `@opencode-ai/plugin` — see §7 |
+
+---
+
+## 7. Plugin ecosystem & ABI research (2026-07-19)
+
+**Goal:** complete the ZCode plugin picture after official docs + 3.3.6 binary exam left the authoring ABI undocumented.
+
+**Sources:**
+- Official docs: `https://zcode.z.ai/en/docs/plugin` (end-user Beta marketplace UX; no `plugin.json` schema)
+- Public GitHub plugins / marketplaces (cloned under `/tmp/zcode-plugin-research/samples/`)
+- Community reverse-engineering handbook: `ashelylinluo/zcode-plugin-swarm` → `ZCode开发手册.md`
+- Community migration notes: `phoben/agent-skills` → `skills/claude-to-zcode/references/zcode-plugin-spec.md`
+- Engine-verified notes in `tmdgusya/glm-hammer` README (against `zcode-cli` 0.15.2 / `zcode.cjs`)
+
+### 7.1 Primary samples inspected
+
+| Repo | Role | Why it matters |
+|------|------|----------------|
+| **[tmdgusya/glm-hammer](https://github.com/tmdgusya/glm-hammer)** | Single-plugin harness | Real hooks (`type: "process"`), skills, agents; engine-verified event list |
+| **[jhlee0409/zcode-glm-fleet](https://github.com/jhlee0409/zcode-glm-fleet)** | Third-party **marketplace** | Root `.zcode-plugin/marketplace.json` + multiple `plugins/*/.zcode-plugin/plugin.json` |
+| Also useful | `yxhpy/zcode-codex-leader`, `younghai/lazyz`, `WcpDDD/zcode-task-monitor`, `9ycrooked/zcode-plugins` | Dual Claude/Codex/ZCode manifests, MCP/`userConfig`, install provenance (`.zcode-plugin-seed.json`) |
+
+**Other public ZCode plugin-ish repos found (not deep-inspected):** `Sapontop/Zcode-Plugins`, `Maatq1544/agentmemory-zcode-plugin`, `taobaoaz/arkpilot`, `macgaf/rtk-zcode-bridge`, `ricardopera/en-prompt`, `thanhndv212/zcode-opencode-importer` (imports OpenCode **sessions**, not OC npm plugins), etc.
+
+### 7.2 Manifest discovery order
+
+Confirmed across glm-hammer / fleet / handbook:
+
+1. `.zcode-plugin/plugin.json` (**preferred / native**)
+2. `.claude-plugin/plugin.json` (Claude Code compat)
+3. `.codex-plugin/plugin.json` (Codex compat)
+
+Many repos ship **two or three** manifests so one tree installs on Claude Code, Codex, and ZCode. ZCode priority is native first.
+
+Marketplace catalog file shapes observed:
+- `.zcode-plugin/marketplace.json` (glm-hammer, glm-fleet)
+- repo-root `marketplace.json` (lazyz, 9ycrooked/zcode-plugins)
+- Claude-style `.claude-plugin/marketplace.json` / `.agents/plugins/marketplace.json`
+
+Typical marketplace entry: `{ name, owner, plugins: [{ name, source, description, ... }] }` where `source` is a relative path (`./` or `./plugins/...`).
+
+Install provenance artifact (post-install): `.zcode-plugin-seed.json` with `hash`, `marketplace`, `plugin`, `pluginVersion`, `source` (`filesystem` / …), `version`.
+
+### 7.3 `plugin.json` shape (from live plugins + handbook)
+
+**Required / common metadata:** `name` (regex roughly `^[a-z0-9][a-z0-9._-]{0,127}$`), `version`, `description`, optional `author` / `license` / `homepage` / `repository` / `keywords`.
+
+**Extension-point fields** (relative paths under plugin root):
+
+| Field | Meaning | Executable? |
+|-------|---------|-------------|
+| `skills` | dir of `*/SKILL.md` | yes |
+| `commands` | dir of `*.md` slash commands | yes |
+| `hooks` | dir/`hooks.json` **or** inline object/array | yes |
+| `mcpServers` | inline map **or** path to `.mcp.json` | yes |
+| `agents` | dir of agent `.md` | **often diagnostic / not auto-run**; handbook + glm-hammer say prefer project `.zcode/agents` for real use |
+| `lspServers` | LSP defs | **UI/diagnostic-only today** (glm-hammer) |
+| `userConfig` | typed settings (`string`/`boolean`/`number` + default/description) | config UI / `${user_config.*}` interpolation |
+| `interface` | Codex-ish display metadata | optional |
+
+**Convention:** some plugins omit path fields and rely on auto-discovery of `skills/`, `hooks/`, `commands/` (glm-hammer metadata-only manifest still ships those dirs; zcode-codex-leader ZCode manifest omits `hooks` intentionally so auto-discovered `hooks/hooks.json` is not double-registered).
+
+**Standard layout:**
+
+```text
+my-plugin/
+├── .zcode-plugin/plugin.json
+├── skills/<name>/SKILL.md
+├── commands/<name>.md
+├── agents/<name>.md          # often display-only
+├── hooks/hooks.json
+├── hooks/<scripts…>
+└── (optional) dist/ for MCP host entrypoints
+```
+
+### 7.4 Hooks ABI (Claude-compatible, ZCode engine)
+
+**Exactly 7 events** (glm-hammer engine verification + handbook):
+
+`SessionStart` → `UserPromptSubmit` → `PreToolUse` → `PermissionRequest` → tool → `PostToolUse` | `PostToolUseFailure` → `Stop`
+
+**Not supported:** `SessionEnd`, `PreCompact`, `Notification`, `SubagentStop` (common Claude misconceptions).
+
+Hook entry styles seen in the wild:
+- `type: "process"` + `command`/`args`/`timeoutMs`/`statusMessage` (glm-hammer; preferred cross-platform)
+- `type: "command"` + shell string (task-monitor, codex-leader; often still uses `${CLAUDE_PLUGIN_ROOT}`)
+
+Matchers: case-sensitive regex; tool-name aliases like `Write`/`Edit` ← `ApplyPatch` noted by glm-hammer.
+
+I/O contract: stdin JSON (`session_id`, `cwd`, `hook_event_name`, …); stdout must be a **strict schema** (extra keys fail). Typical outputs: `additionalContext`, Stop `decision`/`reason`, PreToolUse `permissionDecision` / `updatedInput`.
+
+Env substitution (dual prefix; ZCode does **not** shell out to Claude Code):
+
+| Preferred | Compat |
+|-----------|--------|
+| `${ZCODE_PLUGIN_ROOT}` | `${CLAUDE_PLUGIN_ROOT}` |
+| `${ZCODE_PROJECT_DIR}` | `${CLAUDE_PROJECT_DIR}` |
+| `${ZCODE_SESSION_ID}` | `${CLAUDE_SESSION_ID}` |
+| `${user_config.<key>}` | — |
+
+Runtime paths (handbook / installers):
+- Registry: `~/.zcode/cli/config.json` (`plugins` map)
+- Cache: `~/.zcode/cli/plugins/cache/`
+- Marketplaces: `~/.zcode/cli/plugins/marketplaces/`
+- Engine artifact (read-only): `ZCode.app/.../Resources/glm/zcode.cjs`
+- Session DB used by some plugins: `~/.zcode/cli/db/db.sqlite`
+
+### 7.5 What official docs add vs repos
+
+Docs confirm: Beta marketplace; components Skill / Command / Agent / MCP / Hook / LSP; custom sources = GitHub `owner/repo`, Git URL, or local path; built-ins `document-skills`, `skill-creator`, `android-emulator`, `ios-simulator`, `restore-legacy-sessions`; plugin config under Advanced info.
+
+Docs **still omit** `plugin.json` schema, hook event list, and install cache layout — those come from community plugins + handbook.
+
+### 7.6 Relationship to OpenCode plugins (OPHP)
+
+| Dimension | OpenCode (`@opencode-ai/plugin`) | ZCode marketplace |
+|-----------|----------------------------------|-------------------|
+| Package unit | npm package | Git/local marketplace plugin dir |
+| Manifest | `package.json` + TS `Hooks` / v2 kit | `.zcode-plugin/plugin.json` |
+| Hooks | in-process classic/v2 API | subprocess Claude-style event hooks |
+| Skills/commands | different product surface | first-class markdown components |
+| Host openness | open CLI forks (MiMo/Kilo) | closed Electron + `zcode.cjs` |
+
+**Conclusion (unchanged, now evidence-complete):** ZCode remains **T0** for OPHP. Public plugins prove a **thriving Claude-/Codex-adjacent marketplace**, not an OpenCode npm ABI host. LazyZ even audits **against** `@opencode-ai/*` imports in vendored harness code.
+
+**Only realistic non-OPHP bridges:**
+1. Import-style (already in product): skills / commands / MCP config from external agents including OpenCode’s `opencode.json`
+2. Optional translator project: map a tiny subset of OC skills/commands → `.zcode-plugin` package (high mismatch; hooks are a different runtime)
+
+### 7.7 Sample manifests (abbreviated)
+
+**glm-hammer** (metadata + conventional dirs; hooks in `hooks/hooks.json`):
+
+```json
+{
+  "name": "glm-hammer",
+  "version": "0.6.0",
+  "description": "Forge-and-hammer engineering harness…",
+  "repository": "https://github.com/tmdgusya/glm-hammer"
+}
+```
+
+**glm-fleet plugin** (explicit paths):
+
+```json
+{
+  "name": "glm-verify-spine",
+  "version": "0.1.0",
+  "skills": "skills",
+  "hooks": "hooks"
+}
+```
+
+**Marketplace** (`jhlee0409/zcode-glm-fleet`):
+
+```json
+{
+  "name": "zcode-glm-fleet",
+  "plugins": [
+    { "name": "glm-design-fleet", "source": "./plugins/glm-design-fleet" },
+    { "name": "glm-verify-spine", "source": "./plugins/glm-verify-spine" }
+  ]
+}
+```
