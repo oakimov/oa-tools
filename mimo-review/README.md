@@ -1,6 +1,6 @@
 # MiMo Code Review
 
-Comparison of [MiMo Code](https://github.com/XiaomiMiMo/MiMo-Code) (Xiaomi) against upstream [OpenCode](https://github.com/anomalyco/opencode) (`/Users/mitra/Projects/opencode-research`).
+Comparison of [MiMo Code](https://github.com/XiaomiMiMo/MiMo-Code) (Xiaomi) against upstream [OpenCode](https://github.com/anomalyco/opencode).
 
 See **[MIMO_RESEARCH.md](MIMO_RESEARCH.md)** — architecture lineage, what MiMo kept, what it added/changed, and how it differs from OpenCode today.
 

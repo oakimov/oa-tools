@@ -336,7 +336,7 @@ ZCode can integrate with these external CLI tools:
 
 **Sources:**
 - Official docs: `https://zcode.z.ai/en/docs/plugin` (end-user Beta marketplace UX; no `plugin.json` schema)
-- Public GitHub plugins / marketplaces (cloned under `/tmp/zcode-plugin-research/samples/`)
+- Public GitHub plugins / marketplaces (sample repos listed below)
 - Community reverse-engineering handbook: `ashelylinluo/zcode-plugin-swarm` → `ZCode开发手册.md`
 - Community migration notes: `phoben/agent-skills` → `skills/claude-to-zcode/references/zcode-plugin-spec.md`
 - Engine-verified notes in `tmdgusya/glm-hammer` README (against `zcode-cli` 0.15.2 / `zcode.cjs`)

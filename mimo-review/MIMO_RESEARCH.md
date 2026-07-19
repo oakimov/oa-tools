@@ -2,7 +2,7 @@
 
 **Date:** 2026-07-19  
 **Sources:**
-- OpenCode local checkout: `*/Projects/opencode-research` (anomalyco/opencode, `dev` branch)
+- OpenCode: https://github.com/anomalyco/opencode (`dev` branch)
 - MiMo Code: https://github.com/XiaomiMiMo/MiMo-Code (v0.1.x line, MIT + use restrictions)
 **MiMo claim (README):** fork of OpenCode that keeps core capabilities and adds long-horizon harness features.
 
@@ -55,7 +55,7 @@ MiMo’s root `package.json` still reports `"name": "opencode"` and repository U
 
 ### Packages
 
-| OpenCode (`opencode-research`) | MiMo Code | Notes |
+| OpenCode | MiMo Code | Notes |
 |---|---|---|
 | `opencode`, `plugin`, `sdk`, `ui`, `web`, `desktop`, `console`, `enterprise`, `slack`, … | Same core set | Shared lineage |
 | `core`, `protocol`, `schema`, `server`, `client`, `llm`, `tui`, `session-ui`, `sdk-next`, … | **Absent / folded** | Upstream OpenCode has been splitting packages; MiMo still looks more monolithic around `packages/opencode` |
