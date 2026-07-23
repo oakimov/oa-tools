@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from typing import List, Optional
 
 from common import format_tool_call, format_tool_result
+from transcript_ir import Transcript, TranscriptMessage
 
 PI_AGENT_DIR = os.path.expanduser("~/.pi/agent")
 SESSIONS_DIR = os.path.join(PI_AGENT_DIR, "sessions")
@@ -259,3 +260,115 @@ def delete_sessions(sessions: List[PiSession]) -> dict:
             total["sessions"] += 1
             total["bytes"] += r["file"]
     return total
+
+
+def export_transcript(session: PiSession) -> Transcript:
+    """Export a pi.dev session to Transcript IR by reading the raw JSONL."""
+    ir_messages = []
+    created_at = session.created_at
+    updated_at = session.updated_at
+    cwd = ""
+
+    for obj in _read_jsonl_lines(session.file_path):
+        ts = obj.get("timestamp", "")
+        if ts:
+            updated_at = ts
+
+        t = obj.get("type")
+        if t == "session":
+            if not created_at:
+                created_at = ts
+            cwd = obj.get("cwd", "")
+
+        elif t == "message":
+            msg = obj.get("message", {})
+            role = msg.get("role", "?")
+            if role == "toolResult":
+                text = _extract_pi_text(msg.get("content", []))
+                if text:
+                    ir_messages.append(TranscriptMessage(role="assistant", kind="tool_result", text=text, timestamp=ts))
+                continue
+            if role not in ("user", "assistant"):
+                continue
+            for block in msg.get("content", []):
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type")
+                if btype == "text":
+                    text = block.get("text", "")
+                    if text:
+                        ir_messages.append(TranscriptMessage(role=role, kind="text", text=text, timestamp=ts))
+                elif btype == "toolCall":
+                    inp = block.get("arguments", {})
+                    ir_messages.append(TranscriptMessage(
+                        role=role, kind="tool_call",
+                        tool_name=block.get("name", "?"),
+                        tool_input=inp if isinstance(inp, dict) else {"_raw": str(inp)},
+                        timestamp=ts,
+                    ))
+
+    return Transcript(
+        source_tool="pi",
+        session_id=session.session_id,
+        title=session.title or session.session_id[:12],
+        cwd=cwd or "",
+        created_at=created_at or "",
+        updated_at=updated_at or "",
+        messages=ir_messages,
+    )
+
+
+def import_transcript(transcript: Transcript, target_cwd: str) -> str:
+    """Import a Transcript IR into pi.dev's storage format.
+
+    Creates a JSONL session file under ~/.pi/agent/sessions/ and returns
+    the new session id.
+    """
+    import uuid
+
+    session_id = str(uuid.uuid4())
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    encoded_cwd = target_cwd.strip("/").replace("/", "-") or "root"
+    fname = f"{ts.replace(':', '-')}_{session_id}.jsonl"
+    session_dir = os.path.join(SESSIONS_DIR, f"--{encoded_cwd}--")
+    os.makedirs(session_dir, exist_ok=True)
+    session_path = os.path.join(session_dir, fname)
+
+    with open(session_path, "w") as f:
+        session_event = {
+            "type": "session",
+            "id": session_id,
+            "cwd": target_cwd,
+            "timestamp": ts,
+        }
+        f.write(json.dumps(session_event, ensure_ascii=False) + "\n")
+
+        for msg in transcript.messages:
+            content = []
+            role = msg.role
+            kind = msg.kind
+
+            if kind == "text":
+                content.append({"type": "text", "text": msg.text})
+            elif kind == "thinking":
+                content.append({"type": "text", "text": msg.text})
+            elif kind == "tool_call":
+                content.append({
+                    "type": "toolCall",
+                    "name": msg.tool_name or "?",
+                    "arguments": msg.tool_input or {},
+                })
+            elif kind == "tool_result":
+                role = "toolResult"
+                content.append({"type": "text", "text": msg.text})
+            else:
+                continue
+
+            event = {
+                "type": "message",
+                "timestamp": ts or msg.timestamp,
+                "message": {"role": role, "content": content},
+            }
+            f.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+    return session_id

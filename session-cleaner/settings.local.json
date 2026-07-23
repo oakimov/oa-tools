@@ -28,7 +28,7 @@
       "Read(~/.claude/**)",
       "Read(~/Projects/*)",
       "Read(//tmp/*)",
-      "Write(//tmp/*)",
+      "Edit(//tmp/*)",
       "mcp__brave-search__*",
       "Skill(firecrawl-*)"
     ],

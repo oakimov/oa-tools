@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 from typing import List, Optional
 
 from common import format_tool_call, format_tool_result
+from transcript_ir import Transcript, TranscriptMessage
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -361,6 +362,174 @@ def delete_sessions(session_ids: List[str]) -> dict:
 def delete_all_sessions() -> dict:
     """Delete all sessions. Returns stats."""
     return delete_sessions([s.session_id for s in scan_sessions()])
+
+
+def export_transcript(session: CodexSession) -> Transcript:
+    """Export a Codex session to Transcript IR by reading the raw JSONL."""
+    if not session.file_path or not os.path.isfile(session.file_path):
+        raise ValueError(f"Session file not found: {session.file_path}")
+
+    cwd = session.cwd
+    ir_messages = []
+    created_at = session.created_at
+    updated_at = session.updated_at
+
+    with open(session.file_path, "r", errors="replace") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                obj = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+
+            ts = obj.get("timestamp", "")
+            if ts:
+                updated_at = ts
+
+            t = obj.get("type")
+            if t in ("session_meta", "turn_context"):
+                if not created_at:
+                    created_at = ts
+                payload = obj.get("payload", {})
+                if not cwd:
+                    cwd = payload.get("cwd", "")
+
+            elif t == "response_item":
+                payload = obj.get("payload", {})
+                ptype = payload.get("type")
+
+                if ptype == "message":
+                    role = payload.get("role", "?")
+                    if role not in ("user", "assistant"):
+                        continue
+                    for block in payload.get("content", []):
+                        if not isinstance(block, dict):
+                            continue
+                        btype = block.get("type")
+                        if btype in ("input_text", "output_text", "text"):
+                            text = block.get("text", "")
+                            if text:
+                                ir_messages.append(TranscriptMessage(role=role, kind="text", text=text, timestamp=ts))
+
+                elif ptype == "function_call":
+                    args = payload.get("arguments", "")
+                    try:
+                        args = json.loads(args) if isinstance(args, str) else args
+                    except (json.JSONDecodeError, TypeError):
+                        pass
+                    ir_messages.append(TranscriptMessage(
+                        role="assistant", kind="tool_call",
+                        tool_name=payload.get("name", "?"),
+                        tool_input=args if isinstance(args, dict) else {"_raw": str(args)},
+                        timestamp=ts,
+                    ))
+
+                elif ptype == "function_call_output":
+                    output = payload.get("output", "")
+                    ir_messages.append(TranscriptMessage(
+                        role="assistant", kind="tool_result",
+                        text=output if isinstance(output, str) else json.dumps(output),
+                        timestamp=ts,
+                    ))
+
+    return Transcript(
+        source_tool="codex",
+        session_id=session.session_id,
+        title=session.thread_name or session.session_id[:12],
+        cwd=cwd or "",
+        created_at=created_at or "",
+        updated_at=updated_at or "",
+        messages=ir_messages,
+    )
+
+
+def import_transcript(transcript: Transcript, target_cwd: str) -> str:
+    """Import a Transcript IR into Codex's storage format.
+
+    Creates a JSONL session file under ~/.codex/sessions/ and updates
+    session_index.jsonl and history.jsonl.  Returns the new session id.
+    """
+    session_id = _gen_codex_id()
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    fname = f"{ts.replace(':', '-')}_{session_id}.jsonl"
+    subdir_name = _slugify_cwd(target_cwd)
+    session_dir = os.path.join(SESSIONS_DIR, subdir_name)
+    os.makedirs(session_dir, exist_ok=True)
+    session_path = os.path.join(session_dir, fname)
+
+    with open(session_path, "w") as f:
+        meta = {
+            "type": "session_meta",
+            "timestamp": ts,
+            "payload": {"cwd": target_cwd},
+        }
+        f.write(json.dumps(meta, ensure_ascii=False) + "\n")
+
+        for msg in transcript.messages:
+            role = msg.role
+            payload = {}
+            if msg.kind == "text":
+                payload = {
+                    "type": "message",
+                    "role": role,
+                    "content": [{"type": "output_text" if role == "assistant" else "input_text", "text": msg.text}],
+                }
+            elif msg.kind == "thinking":
+                payload = {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": msg.text}],
+                }
+            elif msg.kind == "tool_call":
+                payload = {
+                    "type": "function_call",
+                    "name": msg.tool_name or "?",
+                    "arguments": json.dumps(msg.tool_input or {}),
+                }
+            elif msg.kind == "tool_result":
+                payload = {
+                    "type": "function_call_output",
+                    "output": msg.text,
+                }
+            else:
+                continue
+            event = {"type": "response_item", "timestamp": ts, "payload": payload}
+            f.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+    # update index
+    index_entry = {
+        "id": session_id,
+        "thread_name": transcript.title or "Imported transcript",
+        "updated_at": ts,
+    }
+    _append_jsonl(SESSION_INDEX, index_entry)
+
+    # update history
+    hist_entry = {
+        "session_id": session_id,
+        "text": transcript.title or "Imported transcript",
+        "role": "user",
+    }
+    _append_jsonl(HISTORY_FILE, hist_entry)
+
+    return session_id
+
+
+def _gen_codex_id() -> str:
+    import uuid
+    return str(uuid.uuid4())
+
+
+def _slugify_cwd(path: str) -> str:
+    return path.strip("/").replace("/", "-") or "root"
+
+
+def _append_jsonl(path: str, entry: dict) -> None:
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    with open(path, "a") as f:
+        f.write(json.dumps(entry, ensure_ascii=False) + "\n")
 
 
 def reconcile_sessions() -> dict:

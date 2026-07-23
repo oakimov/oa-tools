@@ -17,6 +17,7 @@ Covers both Cursor surfaces:
   skipped; only the plain-JSON message blobs are read).
 """
 
+import hashlib
 import json
 import os
 import re
@@ -27,6 +28,7 @@ from typing import List, Optional
 
 import cursor_crypt
 from common import format_tool_call, format_tool_result
+from transcript_ir import Transcript, TranscriptMessage
 
 # ---------------------------------------------------------------------------
 # Paths
@@ -1091,3 +1093,243 @@ def reconcile_agents() -> dict:
 
     db.commit()
     return stats
+
+
+# ---------------------------------------------------------------------------
+# Export (IDE + CLI)
+# ---------------------------------------------------------------------------
+
+
+def export_bubble_transcript(conversation: CursorConversation) -> Transcript:
+    """Export a Cursor IDE conversation to Transcript IR.
+
+    Reads raw bubble data from the KV store (preserving toolFormerData
+    structure), falling back to the display-text decryption path when
+    bubbles are encrypted.
+    """
+    cwd = conversation.project_folder or ""
+    db = _get_db()
+    rows = db.execute(
+        "SELECT value FROM cursorDiskKV WHERE key LIKE ?",
+        (f"bubbleId:{conversation.composer_id}:%",),
+    ).fetchall()
+
+    ir_messages = []
+    created_at = ""
+    updated_at = ""
+
+    has_plain_bubbles = False
+    for row in rows:
+        has_plain_bubbles = True
+        try:
+            obj = json.loads(row["value"])
+        except (json.JSONDecodeError, TypeError):
+            continue
+        ts = obj.get("createdAt", "")
+        if ts:
+            updated_at = ts
+            if not created_at:
+                created_at = ts
+        role = "user" if str(obj.get("type", "")) == "1" else "assistant"
+        text = obj.get("text", "") or ""
+        if text:
+            ir_messages.append(TranscriptMessage(role=role, kind="text", text=text, timestamp=ts))
+        tfd = obj.get("toolFormerData")
+        if isinstance(tfd, dict):
+            tool_name = tfd.get("name", "?")
+            params = tfd.get("params", "")
+            try:
+                inp = json.loads(params) if isinstance(params, str) else params
+            except (json.JSONDecodeError, TypeError):
+                inp = {"_raw": str(params)}
+            ir_messages.append(TranscriptMessage(
+                role=role, kind="tool_call", tool_name=tool_name,
+                tool_input=inp if isinstance(inp, dict) else {"_raw": str(inp)},
+                timestamp=ts,
+            ))
+            result_raw = tfd.get("result", "")
+            if result_raw:
+                try:
+                    result = json.loads(result_raw) if isinstance(result_raw, str) else result_raw
+                except (json.JSONDecodeError, TypeError):
+                    result = result_raw
+                output = result.get("contents", result) if isinstance(result, dict) else result
+                if output:
+                    ir_messages.append(TranscriptMessage(
+                        role=role, kind="tool_result",
+                        text=output if isinstance(output, str) else json.dumps(output),
+                        timestamp=ts,
+                    ))
+
+    if not has_plain_bubbles:
+        for m in get_bubble_messages(conversation.composer_id):
+            ts = m.get("timestamp") or ""
+            if ts:
+                updated_at = ts
+                if not created_at:
+                    created_at = ts
+            role = m["role"].lower() if m["role"] in ("USER", "ASSISTANT") else "assistant"
+            text = m.get("text", "")
+            if not text:
+                continue
+            if text.startswith("Tool Call:"):
+                ir_messages.append(TranscriptMessage(
+                    role=role, kind="tool_call", text=text, timestamp=ts,
+                ))
+            elif text.startswith("Tool Result:"):
+                ir_messages.append(TranscriptMessage(
+                    role=role, kind="tool_result", text=text, timestamp=ts,
+                ))
+            else:
+                ir_messages.append(TranscriptMessage(role=role, kind="text", text=text, timestamp=ts))
+
+    return Transcript(
+        source_tool="cursor_ide",
+        session_id=conversation.composer_id,
+        title=conversation.name or conversation.composer_id[:12],
+        cwd=cwd,
+        created_at=str(conversation.created_at) if conversation.created_at else "",
+        updated_at=str(conversation.updated_at) if conversation.updated_at else "",
+        messages=ir_messages,
+    )
+
+
+def export_cli_transcript(chat: CliChat) -> Transcript:
+    """Export a Cursor CLI chat to Transcript IR.
+
+    Reads the agent-transcripts JSONL mirror (structured) when available,
+    falling back to the display-text store.db path.
+    """
+    transcript_path = os.path.join(
+        CLI_PROJECTS_DIR,
+        chat.workspace_hash,
+        "agent-transcripts",
+        chat.chat_id,
+        f"{chat.chat_id}.jsonl",
+    )
+    cwd = chat.dir_path
+
+    ir_messages = []
+    created_at = str(chat.created_at) if chat.created_at else ""
+    updated_at = str(chat.updated_at) if chat.updated_at else ""
+
+    def _parse_cli_line(obj: dict) -> None:
+        msg = obj.get("message") if isinstance(obj.get("message"), dict) else obj
+        role = msg.get("role") or obj.get("role") or "assistant"
+        if role not in ("user", "assistant"):
+            return
+        content = msg.get("content", "")
+        ts = obj.get("timestamp") or ""
+
+        if isinstance(content, str):
+            if content:
+                ir_messages.append(TranscriptMessage(role=role, kind="text", text=content, timestamp=ts))
+            return
+
+        if isinstance(content, list):
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                btype = block.get("type")
+                if btype == "text":
+                    text = block.get("text", "")
+                    if text:
+                        ir_messages.append(TranscriptMessage(role=role, kind="text", text=text, timestamp=ts))
+                elif btype == "tool_use":
+                    inp = block.get("input", {})
+                    ir_messages.append(TranscriptMessage(
+                        role=role, kind="tool_call",
+                        tool_name=block.get("name", "?"),
+                        tool_input=inp if isinstance(inp, dict) else {"_raw": str(inp)},
+                        timestamp=ts,
+                    ))
+                elif btype == "tool_result":
+                    result_text = _extract_text(block.get("content", ""))
+                    if result_text:
+                        ir_messages.append(TranscriptMessage(
+                            role=role, kind="tool_result", text=result_text, timestamp=ts,
+                        ))
+
+    if os.path.isfile(transcript_path):
+        with open(transcript_path, "r", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    _parse_cli_line(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    else:
+        for m in get_cli_chat_messages(chat):
+            role = m["role"].lower() if m["role"] in ("USER", "ASSISTANT") else "assistant"
+            text = m.get("text", "")
+            if not text:
+                continue
+            ir_messages.append(TranscriptMessage(role=role, kind="text", text=text, timestamp=m.get("timestamp")))
+
+    return Transcript(
+        source_tool="cursor_cli",
+        session_id=chat.chat_id,
+        title=chat.title or chat.chat_id[:12],
+        cwd=cwd,
+        created_at=created_at,
+        updated_at=updated_at,
+        messages=ir_messages,
+    )
+
+
+# ---------------------------------------------------------------------------
+# Import (CLI only — IDE encrypted storage too complex)
+# ---------------------------------------------------------------------------
+
+
+def import_cli_transcript(transcript: Transcript, target_cwd: str) -> str:
+    """Import a Transcript IR into Cursor CLI's agent-transcripts format.
+
+    Writes a JSONL agent-transcript under ~/.cursor/projects/ and a stub
+    chat directory under ~/.cursor/chats/.  Returns the new chat id.
+    """
+    import uuid
+    from datetime import datetime, timezone
+
+    chat_id = str(uuid.uuid4())
+    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+    slug = target_cwd.strip("/").replace("/", "-") or "root"
+    ws_hash = hashlib.md5(target_cwd.encode()).hexdigest()
+
+    transcript_dir = os.path.join(CLI_PROJECTS_DIR, slug, "agent-transcripts", chat_id)
+    os.makedirs(transcript_dir, exist_ok=True)
+    transcript_path = os.path.join(transcript_dir, f"{chat_id}.jsonl")
+
+    with open(transcript_path, "w") as f:
+        for msg in transcript.messages:
+            block = _ir_to_cli_block(msg)
+            if block is None:
+                continue
+            event = {"message": {"role": msg.role, "content": block}}
+            f.write(json.dumps(event, ensure_ascii=False) + "\n")
+
+    chats_dir = os.path.join(CLI_CHATS_DIR, ws_hash, chat_id)
+    os.makedirs(chats_dir, exist_ok=True)
+    meta = {"title": transcript.title or "Imported transcript", "createdAtMs": int(datetime.now(timezone.utc).timestamp() * 1000), "updatedAtMs": int(datetime.now(timezone.utc).timestamp() * 1000)}
+    with open(os.path.join(chats_dir, "meta.json"), "w") as f:
+        json.dump(meta, f)
+    with open(os.path.join(chats_dir, "prompt_history.json"), "w") as f:
+        json.dump([], f)
+
+    return chat_id
+
+
+def _ir_to_cli_block(msg: TranscriptMessage):
+    """Convert a TranscriptMessage to a Cursor CLI content block list or string."""
+    kind = msg.kind
+    if kind == "text":
+        return [{"type": "text", "text": msg.text}]
+    if kind == "thinking":
+        return [{"type": "text", "text": msg.text}]
+    if kind == "tool_call":
+        return [{"type": "tool_use", "name": msg.tool_name or "?", "input": msg.tool_input or {}}]
+    if kind == "tool_result":
+        return [{"type": "tool_result", "content": [{"type": "text", "text": msg.text}]}]
+    return None
