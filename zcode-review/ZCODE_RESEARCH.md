@@ -491,3 +491,178 @@ Docs **still omit** `plugin.json` schema, hook event list, and install cache lay
   ]
 }
 ```
+
+---
+
+## 8. Reintroducing OpenCode npm plugin compatibility (2026-07-19)
+
+**Question:** Can OCP “reintroduce” former OpenCode `@opencode-ai/plugin` support into ZCode (parity with MiMo/Kilo M1)?
+
+**Short answer:** There is **nothing to restore**. Across **3.3.3 and 3.3.6**, ZCode never ships an in-process OpenCode npm plugin loader. What was “retired” is an old **desktop-host marketplace management IPC**, not OC plugins. True OCP parity would be a **greenfield host feature** inside Z.AI’s closed `zcode.cjs` / desktop stack.
+
+### 8.1 What “Legacy plugin management has been retired” actually is
+
+In `@zcode/desktop` `out/host/index.js` (both 3.3.3 and 3.3.6):
+
+- `createPluginsService` → stub
+- `getOverview` returns empty lists + `capability: { supported: false }` (`createRetiredOverview`)
+- mutators (`addMarketplace`, `installPlugin`, `setPluginEnabled`, …) throw
+  **`Legacy plugin management has been retired in ZCode Agent mode`**
+
+That API shape (marketplaces / available / installed) matches **Claude-/Codex-style marketplace management**, not `@opencode-ai/plugin`. Agent-mode marketplace loading remains **live** in `Resources/glm/zcode.cjs` (`.zcode-plugin` / `.claude-plugin` / `.codex-plugin` / even `.cursor-plugin` manifest discovery; subprocess hooks).
+
+### 8.2 3.3.3 → 3.3.6 delta (plugin-relevant)
+
+| Signal | 3.3.3 | 3.3.6 |
+|--------|-------|-------|
+| Retired `createPluginsService` stub | yes | yes |
+| `importPluginsForAgent` / OpenCode path table | yes | yes |
+| Host `marketplace.json` string refs | 0 | 4 (host sync/marketplace helpers grew) |
+| `@opencode-ai/plugin` / `.opencode/plugins` **loader** | **0** | **0** |
+| `zcode.cjs` `@opencode-ai/` | n/a (same engine family) | **0** |
+
+OpenCode mentions in host are **agent config / provider / import** surfaces (`opencode.json`, skills/commands/plugins **import roots**, Zen `OPENCODE_API_KEY` provider env in engine) — not an npm plugin runtime.
+
+### 8.3 The misleading `.opencode/plugins` importer
+
+Host **does** scan OpenCode-looking plugin directories for **manual import**:
+
+- project: `.opencode/plugins`
+- global: `~/.config/opencode/plugins`
+
+…via `getExternalPluginRoots` → `collectPluginPaths` → `importPluginsForAgent`.
+
+But `findPluginManifestPath` only accepts:
+
+1. `.zcode-plugin/plugin.json`
+2. `.claude-plugin/plugin.json`
+3. `.codex-plugin/plugin.json`
+
+It does **not** accept OpenCode npm packages (`package.json` + `import "@opencode-ai/plugin"`). So this is a **path convenience** for Claude-/Codex-/ZCode marketplace trees that happen to live under OpenCode directories — **not** OCP ABI support. Import copies/symlinks into ZCode plugin dirs and registers `plugins.dirs` in ZCode config.
+
+Parallel importers exist for OpenCode **skills**, **commands**, and **MCP** from `opencode.json` — again config/asset migration, not in-process OC hooks.
+
+### 8.4 Implication for OCP / MiMo-Kilo parity
+
+| OCP M1 layer | MiMo/Kilo today | ZCode today |
+|--------------|-----------------|-------------|
+| A Facades (`@opencode-ai/plugin` remap) | Host already has npm plugin install tree | **No npm plugin install/runtime tree** |
+| B Dual-scan `.opencode` local plugins | Host already loads OC-format local plugins | Importer only accepts marketplace manifests |
+| E `host-promise-v2` embed | Host already has classic/v2 provider resolve | **No** classic/v2 plugin provider |
+
+Therefore “reintroduce OC plugin compatibility” ≠ flip `HostProfile` / write a thin `patches/zcode-m1.md` like MiMo. It means asking Z.AI (or a hard fork) to **add** an OpenCode-compatible in-process loader first; only then can OCP facades/dual-scan/kit apply.
+
+### 8.5 Practical options (accept/decline)
+
+1. **Keep T0 (honest)** — doctor + privacy docs; no false loadable claim.
+2. **Speculative host feature request** — draft `patches/zcode-m1.md` as greenfield requirements for Z.AI; OCP stays `supported: false` until a real loader ships.
+3. **Non-OCP translator** — map a subset of OC skills/commands/MCP → `.zcode-plugin` (product already does much of this via import UI); still does not run unchanged OC npm plugins.
+4. **Historical dig (optional)** — obtain a pre–Agent-mode build (research base mentioned 3.2.5) if one surfaces; current public feeds under `cdn.codegeex.cn` / `cdn.zcode-ai.com` `…/electron/releases` did not yield `latest-mac.yml`. Even if an older desktop PluginsService was richer, evidence still points at marketplace ABI, not `@opencode-ai/plugin`.
+
+**Local note:** `/Users/mitra/ZCodeProject` is empty (placeholder only).
+
+---
+
+## 9. Option 3 research — OC → `.zcode-plugin` translator (non-OCP) (2026-07-19)
+
+**Goal:** evaluate a **separate** translator that maps a subset of OpenCode assets into ZCode marketplace plugins — **not** running unchanged `@opencode-ai/plugin` packages (that remains T0 / needs host loader per §8).
+
+### 9.1 What ZCode already imports (manual UI only)
+
+Host settings-sync import pipeline (`intent === "manualImport"`), categories: `skills` | `commands` | `plugins` | `mcpServers`.
+
+| Category | OpenCode roots scanned | Acceptance / transform | Install action |
+|----------|------------------------|------------------------|----------------|
+| **Skills** | project `.opencode/skills`; global `~/.config/opencode/skills` | dirs/`SKILL.md`-style discovery (same family as Claude) | symlink/copy into ZCode skill target roots |
+| **Commands** | `.opencode/commands`; `~/.config/opencode/commands` | markdown command files | symlink/copy into ZCode command roots |
+| **Plugins** | `.opencode/plugins`; `~/.config/opencode/plugins` | **only** if child dir has `.zcode-plugin` / `.claude-plugin` / `.codex-plugin` `plugin.json` | copy/symlink + append `plugins.dirs` in ZCode config |
+| **MCP** | `.opencode/opencode.json`; `~/.config/opencode/opencode.json` (`format: "mcpJson"`) | read `mcp` map; `nge()` rewrites OC `command: string[]` + `type: "local"|"remote"` → ZCode `command`/`args` + `type: "stdio"|"http"`; strips some timeout fields | merge into ZCode `mcp.servers` |
+
+**Not imported:** npm package entrypoints, classic `Hooks`, `v2/promise` / `v2/effect` registration, custom `tool()` definitions, auth/provider hooks, TUI plugins.
+
+Gate: discovery/import runs only for **manualImport** + selected categories — not an always-on dual-scan of OC npm plugins.
+
+### 9.2 Format overlap (why skills/commands often “just work”)
+
+**Skills:** Both ecosystems use Claude-ish `skills/<name>/SKILL.md` with YAML `name` + `description`. OpenCode also allows flat `*.md` and optional `slash` frontmatter (`packages/core/src/skill.ts`). ZCode handbook: **only** `name` + `description` are supported; extra Claude/OC fields should be ignored or stripped for cleanliness.
+
+**Commands:** OpenCode loads `{command,commands}/**/*.md` with frontmatter → `template` = body (`ConfigCommand.Info`: `name`, `template`, optional `description`, `agent`, `model`, `subtask`). ZCode commands are markdown slash commands; richer OC fields (`model` / `agent` / `subtask`) are **not** portable 1:1 — body + description are the safe subset.
+
+**MCP:** Structural mapping already exists in-product (`tge`/`nge`). Local argv arrays and remote URLs are the main cases; exotic OC MCP shapes may still need hand fixes.
+
+### 9.3 What a translator could add beyond the in-app importer
+
+| Deliverable | Value vs ZCode UI import | Notes |
+|-------------|--------------------------|-------|
+| CLI: `opencode-assets → my.zcode-plugin/` tree | **High** for CI/distribution | Pack skills + commands + `mcpServers` + generated `.zcode-plugin/plugin.json` without opening ZCode |
+| Marketplace wrapper (`marketplace.json`) | Medium | Publishable third-party source |
+| Frontmatter sanitizer (drop OC-only keys) | Low–medium | Safer ZCode diagnostics |
+| Scan **inside** installed OC npm plugin packages for shipped `skills/` / `commands/` dirs | Medium | Many plugins ship **zero** markdown assets (hooks-only), e.g. `cursor-opencode-provider` |
+| Static extract of **programmatic** `skill.transform` / `command.transform` | **Poor** | Requires executing plugin under OC runtime; not a file translator |
+| Rewrite classic/v2 **hooks** → ZCode subprocess `hooks.json` | **Poor / dishonest** | Different event model, I/O, and capabilities; not equivalent |
+| Rewrite OC `tool()` → MCP server | Possible niche | New engineering project; not “unchanged plugin” |
+
+### 9.4 Coverage reality (important)
+
+OpenCode “plugins” in `opencode.json` are primarily **in-process JS modules** (`Plugin` → `Hooks`). Filesystem skills/commands are a **parallel** config surface (dirs + optional plugin-packaged markdown), not the core ABI OCP targets.
+
+So option 3 at best delivers: **“bring your OC markdown skills/commands + MCP config to ZCode.”**  
+It does **not** deliver: **“run `@opencode-ai/plugin` packages on ZCode.”**
+
+Rough portability:
+
+| OC surface | Translator fit |
+|------------|----------------|
+| Repo/user `SKILL.md` trees | Good |
+| Repo/user command `*.md` | Good (subset of frontmatter) |
+| `opencode.json` `mcp` | Good (mostly done in-app) |
+| npm plugin that only registers hooks/tools/auth | **None** |
+| npm plugin that also vendors `skills/` / `commands/` | Partial (files only) |
+| v2 programmatic skill/command drafts | None (without running host) |
+
+### 9.5 Scope boundary vs OCP
+
+Per `opencode-plugin-compat` `AGENTS.md` / OCP charter:
+
+- OCP goal = **unchanged** OC plugins via facades + host loader.
+- A translator is a **different product** (asset migrator / packager).
+- Should **not** live as `@opencode-compat/*` or claim T1/T3 for `zcode`.
+- Reasonable homes: `oa-tools` sibling, standalone `opencode-to-zcode-plugin`, or docs-only “use ZCode Import” pointer.
+
+ZCode remains **T0** for OCP even if a translator ships.
+
+### 9.6 Suggested translator MVP (if accepted as separate work)
+
+1. Input: path to OC project and/or `~/.config/opencode`.
+2. Collect: `skills/**/SKILL.md`, `commands/**/*.md`, `mcp` from `opencode.json`.
+3. Emit:
+   ```text
+   out-plugin/
+     .zcode-plugin/plugin.json
+     skills/...
+     commands/...
+     (optional) .mcp.json or inline mcpServers
+   ```
+4. Report **skipped**: `plugin[]` JS entrypoints, hook-only packages, unsupported frontmatter keys.
+5. Tests: fixtures from `opencode-research` skills + a sample `opencode.json` mcp map; golden `.zcode-plugin` tree.
+6. Explicit README: “not OCP; does not run OC npm plugins.”
+
+### 9.7 Recommendation
+
+- **Do not** fold this into OCP bridge packages.
+- **Prefer** documenting “use ZCode Agent → Import from OpenCode” for interactive users (already ships).
+- **Only build a CLI packager** if you need offline/CI marketplace artifacts or sanitizing bulk skill packs — accept that hook-centric plugins (the OCP success criterion) stay unsupported on ZCode.
+
+### 9.8 Live case study — this machine’s OpenCode config (2026-07-19)
+
+Verified against `~/.config/opencode/opencode.json` + sibling dirs (secrets intentionally omitted from notes):
+
+| Asset | Present? | Translator / ZCode Import outcome |
+|-------|----------|-----------------------------------|
+| `skills/` (global) | **Missing** | Nothing to pack |
+| `commands/` (global) | **Missing** | Nothing to pack |
+| `plugins/` (global) | **Missing** | No marketplace trees under OC plugin roots |
+| `mcp` map | **Yes** — mix of `type: "local"` (argv) and `type: "remote"` (URL + headers); several `enabled: false` | **Good fit** for in-app MCP import (`mcpJson` / `nge()`); CLI packager would copy the same map with env/header redaction policy |
+| `plugin[]` | **Yes** — one absolute path to `cursor-opencode-provider` `dist/index.js` | **Skipped** — classic/v2 `Hooks` provider plugin; no `skills/` / `commands/` / `.zcode-plugin` in that package |
+
+**Punchline for this workstation:** option 3 would mainly re-export MCP servers (already importable in ZCode UI). The only registered OpenCode “plugin” is exactly the class option 3 cannot help — in-process OC ABI. No global markdown skills/commands exist to translate today.

@@ -235,11 +235,40 @@ More transparent than ZCode; still **telemetry on by default**.
 |---|---|
 | Package | `@kilocode/kilo-telemetry` (`posthog-node`) |
 | Host | `https://us.i.posthog.com` |
-| Default | **Enabled** unless `experimental.openTelemetry === false` (or `KILO_TELEMETRY_LEVEL` not `all` when set) |
-| Identity | Persistent machine id; on Kilo auth, identify+alias to email / org id |
-| Opt-out | Config + runtime `setEnabled`; docs also mention OTEL-related toggles |
+| Default | **Enabled** (`Telemetry.init` uses `cfg.experimental?.openTelemetry !== false`, so missing/`true` ⇒ on) |
+| Identity | Persistent machine id at `{XDG data}/kilo/telemetry-id` (typically `~/.local/share/kilo/telemetry-id`); on Kilo auth, identify+alias to email / org id |
+| Opt-out | Config + env + runtime `POST /telemetry/setEnabled` (VS Code propagates `vscode.env.isTelemetryEnabled`) |
 
 **Events tracked (enumerated in code):** CLI start/exit; session start/end/message; LLM completion metadata (provider, model, tokens, cost — not prompt bodies in the event enum); command/tool/agent used; plan followup; suggestion shown/accepted; indexing lifecycle; share create/delete; MCP connect/error; remote connection; auth success/logout; feedback; errors; `Telemetry Disabled`.
+
+#### How to disable (verified in source)
+
+**Naming caveat:** config key `experimental.openTelemetry` gates **PostHog** in CLI bootstrap, not the separate `OTEL_EXPORTER_OTLP_*` exporters.
+
+1. **Config (persistent)** — in `~/.config/kilo/kilo.json` (or `kilo.jsonc` / `config.json`):
+
+```json
+{
+  "experimental": {
+    "openTelemetry": false
+  }
+}
+```
+
+2. **Environment (wins when set)** — `KILO_TELEMETRY_LEVEL`:
+   - unset → use config flag above
+   - `all` → force enabled
+   - any other value (e.g. `off`) → force disabled
+
+```bash
+export KILO_TELEMETRY_LEVEL=off
+```
+
+3. **VS Code** — turn off VS Code telemetry; extension skips `/telemetry/capture` and calls `/telemetry/setEnabled`. Still set env/config for the spawned `kilo serve` if you want spawn-time opt-out.
+
+4. **Optional network** — sinkhole `us.i.posthog.com` (do not block `api.kilo.ai` / `app.kilo.ai` for telemetry alone).
+
+OPHP companion write-up (local monorepo): `opencode-plugin-compat/docs/guides/kilocode-telemetry-disable.md`.
 
 ### 7.2 Privacy policy posture
 
