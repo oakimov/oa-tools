@@ -185,17 +185,22 @@ async function sendMessage(config, messages) {
           process.stderr.write('\r\x1b[K');
           spinnerInterval = null;
         }
-        process.stdout.write(chunk);
-        fullResponse += chunk;
+        if (chunk.kind === 'thinking') {
+          process.stderr.write('\x1b[2m' + chunk.text + '\x1b[0m');
+        } else {
+          process.stdout.write(chunk.text);
+          fullResponse += chunk.text;
+        }
       }
       process.stdout.write('\n');
       return fullResponse;
     } else {
-      const { text } = await chatNonStreaming(config, messages);
+      const { text, thinking } = await chatNonStreaming(config, messages);
       if (spinnerInterval) {
         clearInterval(spinnerInterval);
         process.stderr.write('\r\x1b[K');
       }
+      if (thinking) process.stderr.write('\x1b[2m' + thinking + '\x1b[0m\n');
       process.stdout.write(text + '\n');
       return text;
     }

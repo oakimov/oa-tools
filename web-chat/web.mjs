@@ -109,8 +109,11 @@ async function handleChat(req, res) {
     return;
   }
 
+  // "custom" (manual endpoint) → autodetect wire format from the URL shape.
+  const isCustom = provider === 'custom';
   const config = {
-    provider: provider || detectProvider(url),
+    provider: isCustom ? detectProvider(url) : (provider || detectProvider(url)),
+    custom: isCustom,
     url,
     apiKey: resolvedKey,
     model: model || 'gpt-4o',
@@ -136,8 +139,12 @@ async function handleChat(req, res) {
       sseWrite(res, 'start', {});
       let fullText = '';
       for await (const chunk of chatStreaming(config, messages)) {
-        fullText += chunk;
-        sseWrite(res, 'delta', { text: chunk });
+        if (chunk.kind === 'thinking') {
+          sseWrite(res, 'thinking', { kind: 'thinking', text: chunk.text });
+        } else {
+          fullText += chunk.text;
+          sseWrite(res, 'delta', { text: chunk.text });
+        }
       }
       sseWrite(res, 'done', {});
     } catch (err) {
@@ -147,8 +154,8 @@ async function handleChat(req, res) {
   } else {
     res.writeHead(200, { 'Content-Type': 'application/json' });
     try {
-      const { text } = await chatNonStreaming(config, messages);
-      res.end(JSON.stringify({ text }));
+      const { text, thinking } = await chatNonStreaming(config, messages);
+      res.end(JSON.stringify({ text, thinking }));
     } catch (err) {
       res.end(JSON.stringify({ error: err.message }));
     }

@@ -12,6 +12,7 @@ const el = {
   settingsToggle: $('#settingsToggle'),
   themeToggle: $('#themeToggle'),
   apiUrl: $('#apiUrl'),
+  endpointHint: $('#endpointHint'),
   providerSelect: $('#providerSelect'),
   modelSelect: $('#modelSelect'),
   modelInput: $('#modelInput'),
@@ -27,6 +28,8 @@ const el = {
   messageInput: $('#messageInput'),
   sendBtn: $('#sendBtn'),
 };
+
+const CUSTOM_PROVIDER = 'custom';
 
 const KNOWN_ENDPOINTS = {
   openai: 'https://api.openai.com/v1/chat/completions',
@@ -67,6 +70,7 @@ function modelNpm(pid, mid) {
 }
 
 function completeEndpoint(pid, mid) {
+  if (pid === CUSTOM_PROVIDER) return '';
   const known = KNOWN_ENDPOINTS[pid];
   if (known) return known;
 
@@ -84,6 +88,43 @@ function completeEndpoint(pid, mid) {
   const mnpm = mid ? modelNpm(pid, mid) : null;
   const effective = mnpm || cp.npm;
   return url + endpointSuffix(effective);
+}
+
+// Wire-format detection for manual ("custom") endpoints — mirrors api-client.mjs detectProvider.
+function detectEndpointShape(url) {
+  if (!url) return null;
+  const u = url.toLowerCase();
+  if (u.includes('generatecontent')) return 'google';
+  if (u.includes('/responses')) return 'responses';
+  if (u.includes('/messages')) return 'anthropic';
+  if (u.includes('/chat/completions')) return 'openai';
+  if (u.includes('googleapis.com') || u.includes('generativelanguage')) return 'google';
+  if (u.includes('anthropic.com')) return 'anthropic';
+  if (u.includes('openai.com')) return 'openai';
+  return null; // unrecognized → server will use OpenAI format
+}
+
+const SHAPE_LABELS = {
+  openai: 'OpenAI Chat Completions',
+  anthropic: 'Anthropic Messages',
+  responses: 'OpenAI Responses',
+  google: 'Google Gemini (generateContent)',
+};
+
+function updateEndpointHint() {
+  const hint = el.endpointHint;
+  if (!hint) return;
+  if (el.providerSelect.value !== CUSTOM_PROVIDER) { hint.textContent = ''; hint.className = 'endpoint-hint'; return; }
+  const url = el.apiUrl.value.trim();
+  if (!url) { hint.textContent = ''; hint.className = 'endpoint-hint'; return; }
+  const shape = detectEndpointShape(url);
+  if (shape) {
+    hint.textContent = 'Detected format: ' + SHAPE_LABELS[shape];
+    hint.className = 'endpoint-hint ok';
+  } else {
+    hint.textContent = 'Unrecognized endpoint — sending OpenAI Chat Completions format.';
+    hint.className = 'endpoint-hint warn';
+  }
 }
 
 function detectProviderFromUrl(url) {
@@ -109,6 +150,7 @@ function matchProviderFromCatalog(url, providers) {
 }
 
 function updateProviderFromUrl(url) {
+  if (el.providerSelect.value === CUSTOM_PROVIDER) return; // manual mode: never auto-derive
   const cm = matchProviderFromCatalog(url, state.providers);
   const ud = detectProviderFromUrl(url);
   const pid = cm ? cm.id : (ud || el.providerSelect.value);
@@ -143,6 +185,13 @@ function populateModelSelect(providerId) {
 }
 function onProviderChange() {
   const pid = el.providerSelect.value;
+  if (pid === CUSTOM_PROVIDER) {
+    el.modelSelect.innerHTML = '<option value="">Select a model…</option>';
+    el.apiKey.placeholder = 'sk-... or $ENV_VAR_NAME';
+    updateEndpointHint();
+    saveSettings();
+    return;
+  }
   el.apiUrl.value = completeEndpoint(pid);
   populateModelSelect(pid);
   updateApiKeyHint(pid);
@@ -154,6 +203,7 @@ function onProviderChange() {
 
 function syncEndpointForModel(mid) {
   if (!mid) return;
+  if (el.providerSelect.value === CUSTOM_PROVIDER) return;
   el.apiUrl.value = completeEndpoint(el.providerSelect.value, mid);
 }
 
@@ -228,7 +278,7 @@ function addMessage(role, text, isStreaming) {
   if (isStreaming) div.classList.add('streaming');
   const avatar = document.createElement('div');
   avatar.className = 'avatar';
-  avatar.textContent = role === 'user' ? 'U' : 'A';
+  avatar.textContent = role === 'user' ? 'U' : role === 'thinking' ? '\u{1f4ad}' : 'A';
   const bubble = document.createElement('div');
   bubble.className = 'bubble';
   // Render markdown if available, fallback to plain text
@@ -293,6 +343,7 @@ async function loadCatalog() {
     populateModelSelect(el.providerSelect.value);
     updateApiKeyHint(el.providerSelect.value);
     if (el.apiUrl.value) updateProviderFromUrl(el.apiUrl.value);
+    updateEndpointHint();
   } catch (err) {
     console.error('Failed to load providers catalog:', err);
     showWarning('Model catalog unavailable; using built-in providers only.');
@@ -318,6 +369,7 @@ async function sendMessage() {
   state.messages.push({ role: 'user', content: text });
   const messages = state.messages.slice();
   const { bubble } = addMessage('assistant', '', true);
+  let thinkingBubble = null, thinkingText = '';
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(new Error('Request timed out')), 120000);
   try {
@@ -332,7 +384,14 @@ async function sendMessage() {
       if (!t.startsWith('data: ')) return;
       try {
         const ev = JSON.parse(t.slice(6));
-        if (ev.text !== undefined) { full += ev.text; updateStreamingMessage(bubble, full); }
+        if (ev.kind === 'thinking' && ev.text !== undefined) {
+          if (!thinkingBubble) thinkingBubble = addMessage('thinking', '', true).bubble;
+          thinkingText += ev.text;
+          updateStreamingMessage(thinkingBubble, thinkingText);
+        } else if (ev.text !== undefined) {
+          full += ev.text;
+          updateStreamingMessage(bubble, full);
+        }
         if (ev.message) throw new Error(ev.message);
       } catch (e) {
         if (!(e instanceof SyntaxError)) throw e;
@@ -349,6 +408,7 @@ async function sendMessage() {
     buf += decoder.decode();
     if (buf.trim()) processLine(buf);
     finalizeStreaming(bubble.closest('.msg'));
+    if (thinkingBubble) finalizeStreaming(thinkingBubble.closest('.msg'));
     state.messages.push({ role: 'assistant', content: full });
   } catch (err) {
     if (err.name === 'AbortError') {
@@ -357,6 +417,7 @@ async function sendMessage() {
       showError(err.message);
     }
     finalizeStreaming(bubble.closest('.msg'));
+    if (thinkingBubble) finalizeStreaming(thinkingBubble.closest('.msg'));
   } finally {
     clearTimeout(timeout);
     state.streaming = false;
@@ -385,7 +446,7 @@ function init() {
   if (saved.system) el.systemPrompt.value = saved.system;
   el.themeToggle.addEventListener('click', toggleTheme);
   el.settingsToggle.addEventListener('click', toggleSettings);
-  el.apiUrl.addEventListener('input', () => { updateProviderFromUrl(el.apiUrl.value); saveSettings(); });
+  el.apiUrl.addEventListener('input', () => { updateProviderFromUrl(el.apiUrl.value); saveSettings(); updateEndpointHint(); });
   el.providerSelect.addEventListener('change', onProviderChange);
   el.modelSelect.addEventListener('change', onModelSelect);
   el.modelInput.addEventListener('input', () => { syncEndpointForModel(el.modelInput.value.trim()); saveSettings(); });

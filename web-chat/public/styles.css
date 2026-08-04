@@ -155,6 +155,16 @@ header button:hover {
 .settings select:focus { border-color: var(--accent); }
 .settings input::placeholder { color: var(--text-tertiary); }
 
+.endpoint-hint {
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--text-secondary);
+  min-height: 14px;
+}
+.endpoint-hint.ok { color: var(--accent); }
+.endpoint-hint.warn { color: #b45309; }
+body.dark .endpoint-hint.warn { color: #fbbf24; }
+
 .settings .range-row {
   display: flex;
   align-items: center;
@@ -273,7 +283,8 @@ header button:hover {
   border: 1px solid var(--border-light);
   border-bottom-left-radius: 4px;
 }
-.msg.assistant.streaming .bubble::after {
+.msg.assistant.streaming .bubble::after,
+.msg.thinking.streaming .bubble::after {
   content: '▊';
   display: inline-block;
   animation: blink .8s step-end infinite;
@@ -281,6 +292,32 @@ header button:hover {
   margin-left: 2px;
 }
 @keyframes blink { 50% { opacity: 0; } }
+
+/* ── Thinking ───────────────────────────────────────────────── */
+.msg.thinking { align-self: flex-start; }
+.msg.thinking .avatar { background: #fde4ec; color: #b3546f; }
+.msg.thinking .bubble {
+  background: #fdf0f4;
+  border: 1px solid #f6cdd8;
+  border-bottom-left-radius: 4px;
+  color: #8c4a5e;
+  font-style: italic;
+  font-size: 13px;
+}
+.msg.thinking .bubble::before {
+  content: 'Thinking';
+  display: block;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: .05em;
+  text-transform: uppercase;
+  color: #c98a9b;
+  margin-bottom: 4px;
+  font-style: normal;
+}
+body.dark .msg.thinking .avatar { background: #4a2a35; color: #f0aec0; }
+body.dark .msg.thinking .bubble { background: #3a2430; border-color: #5a3242; color: #f0c0cf; }
+body.dark .msg.thinking .bubble::before { color: #d48ba0; }
 
 /* Markdown rendering */
 .msg .bubble pre {

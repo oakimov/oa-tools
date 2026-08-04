@@ -28,11 +28,20 @@ export function buildHeaders(config) {
   return { ...base, Authorization: `Bearer ${config.apiKey}` };
 }
 
-export function googleEndpoint(model, stream) {
+export function googleEndpoint(config, stream) {
+  if (config.custom) {
+    // Custom google-shaped endpoint: build from the provided URL, keep any model path.
+    let base = String(config.url || '')
+      .replace(/[?&].*$/, '')
+      .replace(/:(stream)?generateContent.*$/i, '')
+      .replace(/\/+$/, '');
+    if (!/\/models\/[^/]+$/.test(base)) base += '/models/' + config.model;
+    return base + (stream ? ':streamGenerateContent?alt=sse' : ':generateContent');
+  }
   const base = 'https://generativelanguage.googleapis.com/v1';
   return stream
-    ? `${base}/models/${model}:streamGenerateContent?alt=sse`
-    : `${base}/models/${model}:generateContent`;
+    ? `${base}/models/${config.model}:streamGenerateContent?alt=sse`
+    : `${base}/models/${config.model}:generateContent`;
 }
 
 export function buildPayload(config, messages) {
@@ -89,7 +98,7 @@ export function buildPayload(config, messages) {
 export async function chatNonStreaming(config, messages) {
   const payload = buildPayload(config, messages);
   const headers = buildHeaders(config);
-  const endpoint = config.provider === 'google' ? googleEndpoint(config.model, false) : config.url;
+  const endpoint = config.provider === 'google' ? googleEndpoint(config, false) : config.url;
   const response = await fetch(endpoint, {
     method: 'POST',
     headers,
@@ -102,17 +111,27 @@ export async function chatNonStreaming(config, messages) {
   }
   const data = await response.json();
   if (config.provider === 'google') {
-    return { text: data.candidates?.[0]?.content?.parts?.[0]?.text || '', data };
+    const parts = data.candidates?.[0]?.content?.parts || [];
+    const text = parts.filter(p => !p.thought).map(p => p.text || '').join('') || '';
+    const thinking = parts.filter(p => p.thought).map(p => p.text || '').join('') || '';
+    return { text, thinking, data };
   }
   if (config.provider === 'anthropic') {
-    return { text: data.content?.[0]?.text || '', data };
+    const blocks = data.content || [];
+    const text = blocks.filter(b => b.type === 'text').map(b => b.text || '').join('') || '';
+    const thinking = blocks.filter(b => b.type === 'thinking').map(b => b.thinking || b.text || '').join('') || '';
+    return { text, thinking, data };
   }
   if (config.provider === 'responses') {
-    return { text: data.output?.[0]?.content?.[0]?.text || '', data };
+    const text = (data.output || []).filter(o => o.type === 'message').map(o => (o.content || []).filter(c => c.type === 'output_text').map(c => c.text || '').join('')).join('') || '';
+    const thinking = (data.output || []).filter(o => o.type === 'reasoning').map(o => (o.summary || []).map(s => s.text || '').join('')).join('') || '';
+    return { text, thinking, data };
   }
-  return { text: data.choices?.[0]?.message?.content || '', data };
+  const msg = data.choices?.[0]?.message || {};
+  return { text: msg.content || '', thinking: msg.reasoning_content || '', data };
 }
 
+// Yields { kind: 'text'|'thinking', text } chunks for every provider.
 export async function* chatStreaming(config, messages) {
   const payload = buildPayload(config, messages);
   const headers = buildHeaders(config);
@@ -120,7 +139,7 @@ export async function* chatStreaming(config, messages) {
     headers['Accept'] = 'text/event-stream';
   }
 
-  const endpoint = config.provider === 'google' ? googleEndpoint(config.model, true) : config.url;
+  const endpoint = config.provider === 'google' ? googleEndpoint(config, true) : config.url;
   const response = await fetch(endpoint, {
     method: 'POST',
     headers,
@@ -157,8 +176,12 @@ export async function* chatStreaming(config, messages) {
             try {
               const obj = JSON.parse(jsonStr);
               if (obj.error) throw new Error(obj.error.message || 'Google API error');
-              const text = obj.candidates?.[0]?.content?.parts?.[0]?.text;
-              if (text) yield text;
+              const parts = obj.candidates?.[0]?.content?.parts;
+              if (parts) {
+                for (const p of parts) {
+                  if (p.text) yield p.thought ? { kind: 'thinking', text: p.text } : { kind: 'text', text: p.text };
+                }
+              }
             } catch (e) {
               if (!(e instanceof SyntaxError)) throw e;
             }
@@ -169,8 +192,12 @@ export async function* chatStreaming(config, messages) {
             if (jsonStr === '[DONE]') return;
             try {
               const obj = JSON.parse(jsonStr);
-              if (obj.type === 'content_block_delta' && obj.delta?.type === 'text_delta') {
-                yield obj.delta.text;
+              if (obj.type === 'content_block_delta' && obj.delta) {
+                if (obj.delta.type === 'text_delta' && obj.delta.text) {
+                  yield { kind: 'text', text: obj.delta.text };
+                } else if (obj.delta.type === 'thinking_delta' && obj.delta.thinking) {
+                  yield { kind: 'thinking', text: obj.delta.thinking };
+                }
               }
             } catch {}
           }
@@ -181,7 +208,11 @@ export async function* chatStreaming(config, messages) {
             try {
               const obj = JSON.parse(jsonStr);
               if (obj.type === 'response.output_text.delta' && obj.delta) {
-                yield obj.delta;
+                yield { kind: 'text', text: obj.delta };
+              } else if (obj.type === 'response.reasoning_text.delta' && obj.delta) {
+                yield { kind: 'thinking', text: obj.delta };
+              } else if (obj.type === 'response.reasoning.summary_text.delta' && obj.delta) {
+                yield { kind: 'thinking', text: obj.delta };
               }
             } catch {}
           }
@@ -191,8 +222,11 @@ export async function* chatStreaming(config, messages) {
             if (jsonStr === '[DONE]') return;
             try {
               const obj = JSON.parse(jsonStr);
-              if (obj.choices?.[0]?.delta?.content) {
-                yield obj.choices[0].delta.content;
+              const delta = obj.choices?.[0]?.delta;
+              if (delta) {
+                const reasoning = delta.reasoning_content ?? delta.reasoning?.content;
+                if (reasoning) yield { kind: 'thinking', text: reasoning };
+                if (delta.content) yield { kind: 'text', text: delta.content };
               }
             } catch {}
           }
@@ -206,14 +240,20 @@ export async function* chatStreaming(config, messages) {
 
 /**
  * Detect provider type from an API endpoint URL.
+ * Path-shape checks come first so a full endpoint URL wins over its hostname
+ * (e.g. api.openai.com/v1/responses → "responses", not "openai").
  */
 export function detectProvider(url) {
   if (!url) return 'openai';
   const u = url.toLowerCase();
+  if (u.includes('generatecontent')) return 'google';
+  if (u.includes('/responses')) return 'responses';
+  if (u.includes('/messages')) return 'anthropic';
+  if (u.includes('/chat/completions')) return 'openai';
   if (u.includes('googleapis.com') || u.includes('generativelanguage')) return 'google';
   if (u.includes('anthropic.com')) return 'anthropic';
-  if (u.includes('/responses')) return 'responses';
-  if (u.includes('openai.com') || u.includes('api.openai')) return 'openai';
+  if (u.includes('openai.com')) return 'openai';
+  // Unrecognized shape → assume OpenAI-compatible (LM Studio, Ollama, proxies, …)
   return 'openai';
 }
 

@@ -26,11 +26,13 @@
     </div>
     <div class="field full">
       <label for="apiUrl">API Endpoint</label>
-      <input type="url" id="apiUrl" placeholder="https://api.openai.com/v1/chat/completions" spellcheck="false">
+      <input type="url" id="apiUrl" placeholder="https://your-provider.example/v1/chat/completions" spellcheck="false">
+      <div class="endpoint-hint" id="endpointHint"></div>
     </div>
     <div class="field">
       <label for="providerSelect">Provider</label>
       <select id="providerSelect">
+        <option value="custom" selected>Custom endpoint</option>
         <option value="openai">OpenAI</option>
         <option value="anthropic">Anthropic</option>
         <option value="google">Google Gemini</option>
@@ -49,7 +51,7 @@
     </div>
     <div class="field full">
       <label for="apiKey">API Key (or <code>$ENV_VAR_NAME</code>)</label>
-      <input type="password" id="apiKey" placeholder="sk-... or $OPENAI_API_KEY" spellcheck="false">
+      <input type="password" id="apiKey" placeholder="sk-... or $ENV_VAR_NAME" spellcheck="false">
     </div>
     <div class="field">
       <label for="temperature">Temperature</label>
