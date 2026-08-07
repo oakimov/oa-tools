@@ -183,7 +183,9 @@ Under `kilocode/`: `rules-migrator`, `modes-migrator`, `mcp-migrator`, `workflow
 
 ### 4.9 Plugin ABI
 
-`@kilocode/plugin` exports the same conceptual surface as `@opencode-ai/plugin` (hooks, tools, TUI, workspace adapters) with Kilo SDK types (`createKiloClient`). Practical implication for OPHP-style work: **Kilo is an OpenCode-plugin-class host** (unlike ZCode’s Claude-/Codex-style `.zcode-plugin` marketplace). Community issues (e.g. oh-my-openagent) treat Kilo CLI as a near-drop-in plugin target with config path differences.
+`@kilocode/plugin` exports the same conceptual surface as `@opencode-ai/plugin` (hooks, tools, TUI, workspace adapters) with Kilo SDK types (`createKiloClient`).
+
+**Comparison takeaway:** Kilo is an **OpenCode-class plugin host** — same in-process npm plugin model as OpenCode and MiMo. That is a different system from ZCode’s Claude-/Codex-style `.zcode-plugin` marketplace. Community issues (e.g. oh-my-openagent) treat Kilo CLI as a near-drop-in OpenCode plugin target, with config path differences (`.kilo` / `.kilocode`, no `.opencode` fallback).
 
 ---
 
@@ -268,8 +270,6 @@ export KILO_TELEMETRY_LEVEL=off
 
 4. **Optional network** — sinkhole `us.i.posthog.com` (do not block `api.kilo.ai` / `app.kilo.ai` for telemetry alone).
 
-OPHP companion write-up (local monorepo): `opencode-plugin-compat/docs/guides/kilocode-telemetry-disable.md`.
-
 ### 7.2 Privacy policy posture
 
 Repo `PRIVACY.md` (CLI-focused): code/prompts go to **chosen model providers**; Kilo claims not to store that content; API keys local. Does **not** deeply document PostHog event schema in that short file — product privacy pages on kilo.ai cover broader apps (Sentry, AppsFlyer, etc. for companion apps).
@@ -318,7 +318,7 @@ Repo `PRIVACY.md` (CLI-focused): code/prompts go to **chosen model providers**; 
 6. **Orchestrator / modes** — multi-agent wave orchestration from Roo/Cline DNA  
 7. **IDE Agent Manager** — multi-session worktree orchestration  
 8. **Platform surfaces** — cloud agents, code reviews, KiloClaw  
-9. **OpenCode-compatible plugin ABI under Kilo SDK** — best peer for OPHP-style plugins among China-adjacent products (vs ZCode)  
+9. **OpenCode-class plugin ABI** (`@kilocode/plugin`) — same host class as OpenCode/MiMo; unlike ZCode’s `.zcode-plugin` marketplace  
 
 ### Not improved (OpenCode or MiMo still stronger)
 
@@ -332,4 +332,4 @@ Repo `PRIVACY.md` (CLI-focused): code/prompts go to **chosen model providers**; 
 
 Kilo Code is an **OpenCode fork specialized into a multi-client commercial agent platform**: same Effect/TUI/server DNA, aggressive upstream sync, then layered Gateway commerce, OS sandbox, memory, indexing, and IDE/cloud clients — with product DNA still carrying Cline/Roo modes.
 
-If OpenCode is the general open agent platform and MiMo is that platform opinionated for multi-hour autonomous runs under Xiaomi, Kilo is that platform **opinionated for “agentic engineering everywhere you work”** (VS Code, JetBrains, CLI, cloud) under Kilo’s gateway and telemetry defaults — at the cost of fork drift risk (mitigated by merge tooling) and vendor-shaped onboarding.
+If OpenCode is the general open agent platform and MiMo is that platform opinionated for multi-hour autonomous runs under Xiaomi, Kilo is that platform **opinionated for “agentic engineering everywhere you work”** (VS Code, JetBrains, CLI, cloud) under Kilo’s gateway and telemetry defaults — at the cost of fork drift risk (mitigated by merge tooling) and vendor-shaped onboarding. Versus ZCode: open OpenCode-class plugin host, not a closed Claude-/Codex-style marketplace fork.

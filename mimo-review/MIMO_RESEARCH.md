@@ -36,7 +36,7 @@ Inherited capabilities MiMo still advertises / ships:
 |---|---|
 | Multi-provider LLM routing | Same OpenCode-style provider model; BYO OpenAI-compatible APIs |
 | Terminal UI (OpenTUI / Solid) | Primary surface; Tab agents |
-| LSP / MCP / plugins | Present; Claude Code / Codex / OpenCode skill inheritance toggles |
+| LSP / MCP / plugins | Present; same OpenCode-class in-process plugin model (`@opencode-ai/plugin` shape under `@mimo-ai/*`); Claude Code / Codex / OpenCode skill inheritance toggles |
 | Permission system | allow / ask / deny; `--dangerously-skip-permissions` |
 | Skills / commands | Skill discovery; MiMo adds large builtin catalog |
 | Sessions, tools, worktrees | Core agent loop still OpenCode-shaped |
@@ -258,14 +258,14 @@ Notable MiMo flags (beyond OpenCode’s `OPENCODE_DISABLE_*` set):
 
 Not the main product delta, but relevant when comparing forks:
 
-| | OpenCode | MiMo |
-|---|---|---|
-| Analytics | No Xiaomi endpoint; OTEL available for local/tracing use | `packages/opencode/src/metrics` → `https://tracking.miui.com/track/v4/o` |
-| Default | Community open-source posture | Analytics enabled unless `MIMOCODE_ENABLE_ANALYSIS=false` |
-| Hosted inference | BYO | MiMo Auto / Xiaomi platform (code may leave the machine) |
-| Extra legal | MIT | MIT + use restrictions (military, high-risk autonomy, etc.) + MiMo ToS for hosted services |
+| | OpenCode | MiMo | Kilo | ZCode |
+|---|---|---|---|---|
+| Source | Open MIT | Open MIT + use restrictions | Open MIT | Closed Electron |
+| Analytics | Community posture; OTEL available | Xiaomi `tracking.miui.com`, **on by default**, `MIMOCODE_ENABLE_ANALYSIS=false` opt-out | PostHog US, **on by default**, config/env opt-out | Alibaba ARMS + Z.AI, **no opt-out found** |
+| Default inference | BYO | MiMo Auto / Xiaomi | Gateway funnel + BYO | Chinese catalog (Z.AI/Zhipu/…) |
+| Plugin host class | `@opencode-ai/plugin` | OpenCode-class (fork keeps in-process npm plugins) | `@kilocode/plugin` (OpenCode-class) | `.zcode-plugin` (Claude/Codex-class) |
 
-Compared to ZCode (closed Electron fork with always-on Alibaba ARMS + no opt-out), MiMo is **more transparent** (open source, documented env opt-out) but still **defaults to Xiaomi telemetry** and steers users toward Xiaomi-hosted models.
+Compared to ZCode (closed Electron fork with always-on Alibaba ARMS + no opt-out), MiMo is **more transparent** (open source, documented env opt-out) but still **defaults to Xiaomi telemetry** and steers users toward Xiaomi-hosted models. Compared to Kilo, MiMo is closer to OpenCode’s TUI-first shape and long-horizon harness depth, while Kilo productizes IDE/cloud clients and a commercial gateway.
 
 ---
 
@@ -316,4 +316,4 @@ Compared to ZCode (closed Electron fork with always-on Alibaba ARMS + no opt-out
 
 MiMo Code is an **OpenCode fork specialized into a long-horizon coding harness**: memory, checkpoints, compose/workflows, goal judging, max-mode, and self-maintenance (`/dream`, `/distill`), wrapped in Xiaomi branding and model defaults.
 
-If OpenCode is a general open agent platform, MiMo is that platform **opinionated for multi-hour / multi-hundred-step runs** and co-evolution with Xiaomi’s MiMo models — at the cost of fork drift, vendor defaults, and Xiaomi-side telemetry/hosted inference.
+If OpenCode is a general open agent platform, MiMo is that platform **opinionated for multi-hour / multi-hundred-step runs** and co-evolution with Xiaomi’s MiMo models — at the cost of fork drift, vendor defaults, and Xiaomi-side telemetry/hosted inference. Versus peers: same OpenCode-class plugin runtime as Kilo; unlike ZCode’s closed Electron + Claude-/Codex-style marketplace.
