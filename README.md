@@ -13,5 +13,6 @@ A collection of command-line tools and utilities.
 | [**mimo-review**](mimo-review/) | Architecture comparison of Xiaomi MiMo Code vs upstream OpenCode — long-horizon harness (memory, checkpoints, compose/workflows, `/goal`, max-mode). |
 | [**kilo-review**](kilo-review/) | Architecture comparison of Kilo Code vs upstream OpenCode — dual lineage (Cline/Roo → OpenCode rebuild), Gateway, sandbox, memory, indexing, PostHog telemetry, multi-client IDE/CLI/cloud. |
 | [**lockedcode-review**](lockedcode-review/) | Architecture and security-hardening audit of LockedCode (~5 stars, very early stage). Covers OS-level confinement, seven-scanner pipeline, DLP, prompt injection detection, immutable audit trail, policy engine, SANDBOX-AUDIT critical findings, and `@opencode-ai/plugin` host ABI inheritance. |
+| [**costrict-review**](costrict-review/) | Architecture/privacy comparison of CoStrict (Sangfor) vs OpenCode — Cline→Roo lineage (not an OpenCode fork), server-assisted Strict Mode workflow, RAG code review, local completion agent, CoStrict Cloud, workspace-trust hardening, and two-channel + raw-conversation/diff telemetry. |
 | [**unarchiver**](unarchiver/) | Universal archive extraction utility with interactive TUI. Supports ZIP, 7z, TAR, RAR, ISO, and more via a plugin system. |
 | [**pihole.txt**](pihole.txt) | Pi-hole blocklist for ad/tracking domains. |
